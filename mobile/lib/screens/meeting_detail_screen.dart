@@ -82,7 +82,7 @@ class _MeetingDetailScreenState extends State<MeetingDetailScreen> {
                   const SizedBox(height: 16),
                   Text('转写分段', style: Theme.of(context).textTheme.titleMedium),
                   const SizedBox(height: 8),
-                  ...(_transcript!['segments'] as List<dynamic>).map((seg) {
+                  ...(_transcript!['segments'] as List<dynamic>? ?? []).map((seg) {
                     final s = seg as Map<String, dynamic>;
                     return Card(
                       child: Padding(

@@ -131,6 +131,24 @@ class VoicePrintResponse(VoicePrintBase):
     model_config = {"from_attributes": True}
 
 
+class VoicePrintListItem(VoicePrintBase):
+    """列表用的轻量 schema，不含 embedding 大字段"""
+    id: int
+    employee_id: int
+    source_audio_path: str | None
+    audio_duration: float | None
+    is_verified: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class VoicePrintBase64Request(BaseModel):
+    employee_id: int
+    audio_base64: str
+    note: str | None = None
+
+
 class VoicePrintVerifyRequest(BaseModel):
     employee_id: int
     audio_data: str | None = None  # Base64 编码的音频数据

@@ -29,6 +29,7 @@ class _HomeScreenState extends State<HomeScreen> {
   List<dynamic> _meetings = [];
   bool _loading = true;
   bool _hasPendingUploads = false;
+  bool _voicePrintVisited = false;
 
   @override
   void initState() {
@@ -75,14 +76,17 @@ class _HomeScreenState extends State<HomeScreen> {
         children: [
           _buildMeetingsList(),
           UploadQueueScreen(uploadQueue: widget.uploadQueue),
-          VoicePrintManagementScreen(api: widget.api),
+          _voicePrintVisited ? VoicePrintManagementScreen(api: widget.api) : const SizedBox.shrink(),
           MeScreen(api: widget.api),
         ],
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tabIndex,
         onDestinationSelected: (i) {
-          setState(() => _tabIndex = i);
+          setState(() {
+            _tabIndex = i;
+            if (i == 2) _voicePrintVisited = true;
+          });
           _loadPendingUploads();
         },
         destinations: [

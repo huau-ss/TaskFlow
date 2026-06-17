@@ -4,9 +4,9 @@ import 'package:dio/dio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiService {
-  ApiService({required this.baseUrl}) : _dio = Dio(BaseOptions(baseUrl: baseUrl));
+  ApiService({required String baseUrl}) : _dio = Dio(BaseOptions(baseUrl: baseUrl));
 
-  final String baseUrl;
+  String get baseUrl => _dio.options.baseUrl;
   final Dio _dio;
   String? _token;
 

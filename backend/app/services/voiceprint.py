@@ -53,12 +53,9 @@ class VoicePrintService:
             "duration": 5.2
         }
         """
-        if settings.mock_asr:
-            # Mock 模式：返回随机向量
-            import random
-            return [random.uniform(-1, 1) for _ in range(512)]
-
         import aiofiles
+
+        embedding_url = getattr(settings, "embedding_url", "http://localhost:8003")
 
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
@@ -66,7 +63,7 @@ class VoicePrintService:
                     audio_data = await f.read()
                 files = {"file": (audio_path.name, audio_data, "audio/wav")}
                 resp = await client.post(
-                    f"{settings.asr_url}/api/embeddings",
+                    f"{embedding_url}/api/embeddings",
                     files=files
                 )
                 resp.raise_for_status()
@@ -74,10 +71,10 @@ class VoicePrintService:
                 embedding = data.get("embedding")
                 if embedding and isinstance(embedding, list):
                     return embedding
-                logger.warning(f"ASR 服务返回的 embedding 格式不正确: {data}")
+                logger.warning(f"Embedding 服务返回格式不正确: {data}")
                 return None
         except Exception as e:
-            logger.error(f"提取声纹特征失败: {e}")
+            logger.error(f"声纹特征提取失败: {e}")
             return None
     
     def register_voice_print(
@@ -91,7 +88,7 @@ class VoicePrintService:
     ) -> VoicePrint:
         """
         注册员工声纹
-        
+
         Args:
             employee_id: 员工 ID
             embedding: 声纹特征向量
@@ -109,7 +106,6 @@ class VoicePrintService:
             is_verified=is_verified
         )
         self.db.add(voice_print)
-        self.db.flush()
         return voice_print
     
     def get_employee_voice_prints(self, employee_id: int) -> list[VoicePrint]:
@@ -179,8 +175,8 @@ class VoicePrintService:
                 best_match_employee_id = employee_id
         
         # 如果相似度低于阈值，认为无法识别
-        if best_similarity < self.MIN_SAMPLES_THRESHOLD:
-            logger.info(f"声纹匹配置信度 {best_similarity} 低于阈值 {self.MIN_SAMPLES_THRESHOLD}，无法识别")
+        if best_similarity < self.SPEAKER_SIMILARITY_THRESHOLD:
+            logger.info(f"声纹匹配置信度 {best_similarity} 低于阈值 {self.SPEAKER_SIMILARITY_THRESHOLD}，无法识别")
             return None, best_similarity
         
         logger.info(f"识别说话人: employee_id={best_match_employee_id}, 置信度={best_similarity:.3f}")
@@ -227,15 +223,18 @@ class VoicePrintService:
 
 
 # 同步版本，用于 Celery 任务
+from sqlalchemy import create_engine as _create_engine
+from sqlalchemy.orm import sessionmaker as _sessionmaker
+
+_sync_engine = _create_engine(settings.database_url_sync)
+_SyncSession = _sessionmaker(_sync_engine)
+
+
 class SyncVoicePrintService:
     """同步版声纹服务，用于 Celery 任务"""
-    
+
     def __init__(self):
-        from sqlalchemy import create_engine
-        from sqlalchemy.orm import sessionmaker
-        
-        engine = create_engine(settings.database_url_sync)
-        self.Session = sessionmaker(engine)
+        self.Session = _SyncSession
     
     def get_employee_voice_prints(self, employee_id: int) -> list[VoicePrint]:
         with self.Session() as db:

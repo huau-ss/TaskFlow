@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     llm_model: str = "qwen2.5-72b-instruct"
     llm_api_key: str = "not-needed"
 
+    embedding_url: str = "http://localhost:8003"
+
     nas_path: str = "./data/nas/meetings"
     api_host: str = "0.0.0.0"
     api_port: int = 8000

@@ -28,7 +28,7 @@ class _VoicePrintManagementScreenState extends State<VoicePrintManagementScreen>
   String? _recordingPath;
   String? _uploadFilePath;
   String? _uploadFileName;
-  final AudioRecorder _recorder = AudioRecorder();
+  AudioRecorder? _recorder;
   int _recordingSeconds = 0;
   Timer? _recordingTimer;
   int _inputMode = 0; // 0: 录音, 1: 文件上传
@@ -42,7 +42,7 @@ class _VoicePrintManagementScreenState extends State<VoicePrintManagementScreen>
   @override
   void dispose() {
     _recordingTimer?.cancel();
-    _recorder.dispose();
+    _recorder?.dispose();
     super.dispose();
   }
 
@@ -86,10 +86,13 @@ class _VoicePrintManagementScreenState extends State<VoicePrintManagementScreen>
     final dir = await getTemporaryDirectory();
     _recordingPath = '${dir.path}/voiceprint_${DateTime.now().millisecondsSinceEpoch}.wav';
 
-    await _recorder.start(
+    _recorder ??= AudioRecorder();
+    await _recorder!.start(
       const RecordConfig(encoder: AudioEncoder.wav, sampleRate: 16000, numChannels: 1),
       path: _recordingPath!,
     );
+
+    _recordingTimer?.cancel();
 
     setState(() {
       _recording = true;
@@ -107,7 +110,8 @@ class _VoicePrintManagementScreenState extends State<VoicePrintManagementScreen>
 
   Future<void> _stopRecording() async {
     _recordingTimer?.cancel();
-    final path = await _recorder.stop();
+    final path = await _recorder?.stop();
+    if (!mounted) return;
     setState(() => _recording = false);
     if (path != null) {
       _recordingPath = path;

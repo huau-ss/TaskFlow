@@ -13,6 +13,8 @@ from app.models import Employee, VoicePrint
 from app.schemas import (
     TranscriptSegmentWithSpeaker,
     TranscriptWithSpeakers,
+    VoicePrintBase64Request,
+    VoicePrintListItem,
     VoicePrintResponse,
 )
 from app.services.voiceprint import VoicePrintService
@@ -87,9 +89,7 @@ async def register_voice_print(
 
 @router.post("/register-audio-base64", response_model=VoicePrintResponse, status_code=status.HTTP_201_CREATED)
 async def register_voice_print_base64(
-    employee_id: int,
-    audio_base64: str,
-    note: str | None = None,
+    req: VoicePrintBase64Request,
     db: AsyncSession = Depends(get_db),
     current_user: Employee = Depends(get_current_user),
 ):
@@ -104,12 +104,12 @@ async def register_voice_print_base64(
     import base64
 
     # 验证员工存在
-    employee = await db.get(Employee, employee_id)
+    employee = await db.get(Employee, req.employee_id)
     if not employee:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="员工不存在")
-    
+
     try:
-        audio_data = base64.b64decode(audio_base64)
+        audio_data = base64.b64decode(req.audio_base64)
     except Exception:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的 Base64 音频数据")
     
@@ -129,11 +129,11 @@ async def register_voice_print_base64(
             )
         
         voice_print = service.register_voice_print(
-            employee_id=employee_id,
+            employee_id=req.employee_id,
             embedding=embedding,
             source_audio_path=str(temp_path),
             audio_duration=len(audio_data) / 16000 / 2,
-            note=note,
+            note=req.note,
             is_verified=False
         )
         
@@ -191,7 +191,7 @@ async def delete_voice_print(
     await db.commit()
 
 
-@router.get("/employee/{employee_id}", response_model=list[VoicePrintResponse])
+@router.get("/employee/{employee_id}", response_model=list[VoicePrintListItem])
 async def get_employee_voiceprints(
     employee_id: int,
     db: AsyncSession = Depends(get_db),
@@ -222,7 +222,7 @@ async def recognize_meeting_speakers(
     # 获取会议和转写片段
     result = await db.execute(
         select(Meeting)
-        .options(selectinload(Meeting.segments))
+        .options(selectinload(Meeting.segments).selectinload(TranscriptSegment.employee))
         .where(Meeting.id == meeting_id)
     )
     meeting = result.scalar_one_or_none()

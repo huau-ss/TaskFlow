@@ -156,6 +156,7 @@ class UploadQueue {
       'upload_queue',
       {
         'status': UploadStatus.pending_upload.name,
+        'retry_count': 0,
         'updated_at': DateTime.now().toIso8601String(),
       },
       where: 'id = ?',

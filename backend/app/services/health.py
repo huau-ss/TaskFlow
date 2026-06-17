@@ -7,7 +7,7 @@ async def check_asr_health() -> dict:
     base = settings.asr_diarize_url.rsplit("/api", 1)[0]
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{base}/health")
+            resp = await client.get(f"{base}/api/health")
             return {"reachable": True, "status_code": resp.status_code}
     except Exception as exc:
         return {"reachable": False, "error": str(exc)}

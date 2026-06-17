@@ -54,6 +54,7 @@ async def upload_meeting(
     db.add(meeting)
     await db.flush()
     await db.refresh(meeting)
+    await db.commit()
 
     dispatch_transcribe(meeting.id)
     return meeting
@@ -153,6 +154,7 @@ async def retranscribe(
     meeting.status = MeetingStatus.uploaded
     meeting.asr_error = None
     await db.flush()
-    dispatch_transcribe(meeting_id)
+    await db.commit()
     await db.refresh(meeting)
+    dispatch_transcribe(meeting_id)
     return meeting
