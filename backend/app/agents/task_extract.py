@@ -1,0 +1,210 @@
+"""LangGraph agent: extract tasks from transcript and match employees."""
+
+import json
+import re
+from datetime import UTC, datetime
+from typing import TypedDict
+
+from dateutil import parser as date_parser
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+from langgraph.graph import END, StateGraph
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import settings
+from app.models import Employee, Meeting, Task, TaskStatus, TranscriptSegment
+
+
+class AgentState(TypedDict, total=False):
+    meeting_id: int
+    transcript_text: str
+    segments: list[dict]
+    extracted_tasks: list[dict]
+    employees: list[dict]
+    matched_tasks: list[dict]
+    errors: list[str]
+    created_task_ids: list[int]
+
+
+def _build_llm() -> ChatOpenAI:
+    return ChatOpenAI(
+        base_url=settings.llm_url,
+        api_key=settings.llm_api_key or "not-needed",
+        model=settings.llm_model,
+        temperature=0,
+    )
+
+
+def _format_transcript(segments: list[TranscriptSegment]) -> tuple[str, list[dict]]:
+    seg_data = []
+    lines = []
+    for seg in sorted(segments, key=lambda s: s.sequence):
+        seg_data.append(
+            {
+                "id": seg.id,
+                "speaker": seg.speaker_label,
+                "text": seg.text,
+                "start_time": seg.start_time,
+                "end_time": seg.end_time,
+            }
+        )
+        lines.append(f"[{seg.id}] {seg.speaker_label}: {seg.text}")
+    return "\n".join(lines), seg_data
+
+
+EXTRACT_SYSTEM = """你是会议纪要任务提取助手。从会议转写文本中提取 actionable 任务。
+输出必须是 JSON 数组，每项包含：
+- task: 任务标题（简短）
+- description: 任务详细描述
+- executor_name: 责任人姓名（从文本推断，无法确定则为 null）
+- deadline_text: 截止时间原文（如"下周五"、"6月20日"）
+- source_segment_ids: 相关转写段落 id 数组
+
+只输出 JSON，不要其他文字。若无任务则输出 []。"""
+
+
+async def extract_tasks_node(state: AgentState) -> AgentState:
+    llm = _build_llm()
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    prompt = f"今天是 {today}。\n\n会议转写：\n{state['transcript_text']}"
+    response = await llm.ainvoke(
+        [SystemMessage(content=EXTRACT_SYSTEM), HumanMessage(content=prompt)]
+    )
+    content = response.content.strip()
+    # Strip markdown code fences if present
+    if content.startswith("```"):
+        content = re.sub(r"^```(?:json)?\n?", "", content)
+        content = re.sub(r"\n?```$", "", content)
+    try:
+        tasks = json.loads(content)
+        if not isinstance(tasks, list):
+            tasks = []
+    except json.JSONDecodeError:
+        state["errors"].append(f"Failed to parse LLM output: {content[:200]}")
+        tasks = []
+    state["extracted_tasks"] = tasks
+    return state
+
+
+async def load_employees_node(state: AgentState, db: AsyncSession) -> AgentState:
+    result = await db.execute(select(Employee).where(Employee.is_active.is_(True)))
+    employees = result.scalars().all()
+    state["employees"] = [{"id": e.id, "name": e.name, "email": e.email} for e in employees]
+    return state
+
+
+def _fuzzy_match_name(name: str | None, employees: list[dict]) -> int | None:
+    if not name or not employees:
+        return None
+    name = name.strip()
+    for emp in employees:
+        if emp["name"] == name:
+            return emp["id"]
+    for emp in employees:
+        if name in emp["name"] or emp["name"] in name:
+            return emp["id"]
+    return None
+
+
+def _parse_deadline(deadline_text: str | None, reference: datetime | None = None) -> datetime | None:
+    if not deadline_text:
+        return None
+    ref = reference or datetime.now(UTC)
+    try:
+        dt = date_parser.parse(deadline_text, default=ref.replace(tzinfo=None))
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=UTC)
+        return dt
+    except (ValueError, TypeError):
+        return None
+
+
+async def match_employees_node(state: AgentState) -> AgentState:
+    matched = []
+    for item in state["extracted_tasks"]:
+        executor_id = _fuzzy_match_name(item.get("executor_name"), state["employees"])
+        segment_ids = item.get("source_segment_ids", [])
+        if isinstance(segment_ids, list):
+            segment_ids_str = json.dumps(segment_ids)
+        else:
+            segment_ids_str = None
+        matched.append(
+            {
+                "title": item.get("task", "未命名任务"),
+                "description": item.get("description"),
+                "executor_id": executor_id,
+                "executor_name": item.get("executor_name"),
+                "deadline": _parse_deadline(item.get("deadline_text")),
+                "source_segment_ids": segment_ids_str,
+            }
+        )
+    state["matched_tasks"] = matched
+    return state
+
+
+async def persist_tasks_node(state: AgentState, db: AsyncSession, meeting_id: int) -> AgentState:
+    created_ids: list[int] = []
+    for item in state["matched_tasks"]:
+        task = Task(
+            title=item["title"],
+            description=item["description"],
+            deadline=item["deadline"],
+            status=TaskStatus.pending,
+            executor_id=item["executor_id"],
+            meeting_id=meeting_id,
+            source_segment_ids=item["source_segment_ids"],
+        )
+        db.add(task)
+        await db.flush()
+        created_ids.append(task.id)
+    state["created_task_ids"] = created_ids
+    return state
+
+
+def build_graph(db: AsyncSession, meeting_id: int):
+    graph = StateGraph(AgentState)
+
+    async def load_employees_wrapper(state: AgentState) -> AgentState:
+        return await load_employees_node(state, db)
+
+    async def persist_wrapper(state: AgentState) -> AgentState:
+        return await persist_tasks_node(state, db, meeting_id)
+
+    graph.add_node("extract", extract_tasks_node)
+    graph.add_node("load_employees", load_employees_wrapper)
+    graph.add_node("match", match_employees_node)
+    graph.add_node("persist", persist_wrapper)
+
+    graph.set_entry_point("load_employees")
+    graph.add_edge("load_employees", "extract")
+    graph.add_edge("extract", "match")
+    graph.add_edge("match", "persist")
+    graph.add_edge("persist", END)
+
+    return graph.compile()
+
+
+async def run_task_extraction(db: AsyncSession, meeting: Meeting) -> list[Task]:
+    transcript_text, _ = _format_transcript(meeting.segments)
+    if not transcript_text.strip():
+        return []
+
+    initial: AgentState = {
+        "meeting_id": meeting.id,
+        "transcript_text": transcript_text,
+        "segments": [],
+        "extracted_tasks": [],
+        "employees": [],
+        "matched_tasks": [],
+        "errors": [],
+    }
+
+    graph = build_graph(db, meeting.id)
+    final_state = await graph.ainvoke(initial)
+
+    created_ids = final_state.get("created_task_ids", [])
+    if not created_ids:
+        return []
+    result = await db.execute(select(Task).where(Task.id.in_(created_ids)).order_by(Task.id))
+    return list(result.scalars().all())

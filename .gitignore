@@ -1,0 +1,17 @@
+.env
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+data/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.dart_tool/
+build/
+.idea/
+.vscode/
+*.iml
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/pubspec.lock
