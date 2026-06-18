@@ -7,6 +7,8 @@ import 'record_screen.dart';
 import 'upload_queue_screen.dart';
 import 'voice_print_management_screen.dart';
 import 'me_screen.dart';
+import 'messages_screen.dart';
+import 'tasks_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({
@@ -30,12 +32,16 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _loading = true;
   bool _hasPendingUploads = false;
   bool _voicePrintVisited = false;
+  int _unreadMessageCount = 0;
+
+  bool get _showVoicePrintTab => widget.api.isAdmin;
 
   @override
   void initState() {
     super.initState();
     _loadMeetings();
     _loadPendingUploads();
+    _loadUnreadCount();
   }
 
   Future<void> _loadMeetings() async {
@@ -51,6 +57,13 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _loadPendingUploads() async {
     final pending = await widget.uploadQueue.getPending();
     if (mounted) setState(() => _hasPendingUploads = pending.isNotEmpty);
+  }
+
+  Future<void> _loadUnreadCount() async {
+    try {
+      final count = await widget.api.getUnreadCount();
+      if (mounted) setState(() => _unreadMessageCount = count);
+    } catch (_) {}
   }
 
   @override
@@ -76,18 +89,24 @@ class _HomeScreenState extends State<HomeScreen> {
         children: [
           _buildMeetingsList(),
           UploadQueueScreen(uploadQueue: widget.uploadQueue),
-          _voicePrintVisited ? VoicePrintManagementScreen(api: widget.api) : const SizedBox.shrink(),
+          _showVoicePrintTab
+              ? (_voicePrintVisited ? VoicePrintManagementScreen(api: widget.api) : const SizedBox.shrink())
+              : const _NonAdminPlaceholder(),
+          TasksScreen(api: widget.api),
+          MessagesScreen(api: widget.api),
           MeScreen(api: widget.api),
         ],
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tabIndex,
         onDestinationSelected: (i) {
+          if (!_showVoicePrintTab && i == 2) return;
           setState(() {
             _tabIndex = i;
             if (i == 2) _voicePrintVisited = true;
           });
           _loadPendingUploads();
+          if (i == 4) _loadUnreadCount();
         },
         destinations: [
           const NavigationDestination(icon: Icon(Icons.meeting_room), label: '会议'),
@@ -98,7 +117,16 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             label: '上传',
           ),
-          const NavigationDestination(icon: Icon(Icons.fingerprint), label: '声纹'),
+          if (_showVoicePrintTab) const NavigationDestination(icon: Icon(Icons.fingerprint), label: '声纹'),
+          const NavigationDestination(icon: Icon(Icons.task_alt), label: '任务'),
+          NavigationDestination(
+            icon: Badge(
+              isLabelVisible: _unreadMessageCount > 0,
+              label: _unreadMessageCount > 99 ? const Text('99+') : Text('$_unreadMessageCount'),
+              child: const Icon(Icons.notifications),
+            ),
+            label: '消息',
+          ),
           const NavigationDestination(icon: Icon(Icons.person), label: '我的'),
         ],
       ),
@@ -160,5 +188,26 @@ class _HomeScreenState extends State<HomeScreen> {
       default:
         return Icons.audio_file;
     }
+  }
+}
+
+class _NonAdminPlaceholder extends StatelessWidget {
+  const _NonAdminPlaceholder();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.lock_outline, size: 64, color: Colors.grey),
+          SizedBox(height: 16),
+          Text(
+            '声纹管理需要管理员权限',
+            style: TextStyle(fontSize: 16, color: Colors.grey),
+          ),
+        ],
+      ),
+    );
   }
 }

@@ -88,9 +88,31 @@ async def extract_tasks_node(state: AgentState) -> AgentState:
 
 
 async def load_employees_node(state: AgentState, db: AsyncSession) -> AgentState:
-    result = await db.execute(select(Employee).where(Employee.is_active.is_(True)))
-    employees = result.scalars().all()
+    """加载员工列表和转写片段信息"""
+    from sqlalchemy.orm import selectinload
+
+    # 加载员工列表
+    emp_result = await db.execute(select(Employee).where(Employee.is_active.is_(True)))
+    employees = emp_result.scalars().all()
     state["employees"] = [{"id": e.id, "name": e.name, "email": e.email} for e in employees]
+
+    # 加载转写片段信息（包含声纹识别结果）
+    seg_result = await db.execute(
+        select(TranscriptSegment).where(TranscriptSegment.meeting_id == state["meeting_id"])
+    )
+    segments = seg_result.scalars().all()
+
+    # 将片段信息添加到 state（用于声纹识别匹配）
+    state["segments"] = [
+        {
+            "id": seg.id,
+            "speaker_label": seg.speaker_label,
+            "employee_id": seg.employee_id,  # 声纹识别结果
+            "text": seg.text,
+        }
+        for seg in segments
+    ]
+
     return state
 
 
@@ -121,30 +143,80 @@ def _parse_deadline(deadline_text: str | None, reference: datetime | None = None
 
 
 async def match_employees_node(state: AgentState) -> AgentState:
+    """匹配执行人 - 结合声纹识别和AI姓名匹配
+
+    优先级：
+    1. 声纹识别结果（片段中已有 employee_id）
+    2. AI 姓名匹配（从文本提取责任人姓名）
+    """
+    # 构建片段映射：segment_id -> employee_id (声纹识别)
+    segment_to_employee = {}
+    for seg in state.get("segments", []):
+        if seg.get("employee_id"):
+            segment_to_employee[seg["id"]] = seg["employee_id"]
+
+    # 构建员工名称映射
+    employee_names = {emp["name"]: emp["id"] for emp in state["employees"]}
+
     matched = []
     for item in state["extracted_tasks"]:
-        executor_id = _fuzzy_match_name(item.get("executor_name"), state["employees"])
+        executor_id = None
+        match_method = None
+
+        # 1. 优先使用声纹识别结果
+        source_segment_ids = item.get("source_segment_ids", [])
+        if source_segment_ids and segment_to_employee:
+            for seg_id in source_segment_ids:
+                if seg_id in segment_to_employee:
+                    executor_id = segment_to_employee[seg_id]
+                    match_method = "voiceprint"
+                    break
+
+        # 2. 如果没有声纹结果，使用 AI 姓名匹配
+        if not executor_id:
+            extracted_name = item.get("executor_name")
+            if extracted_name:
+                # 精确匹配
+                if extracted_name in employee_names:
+                    executor_id = employee_names[extracted_name]
+                    match_method = "name_exact"
+                else:
+                    # 模糊匹配
+                    for emp_name, emp_id in employee_names.items():
+                        if extracted_name in emp_name or emp_name in extracted_name:
+                            executor_id = emp_id
+                            match_method = "name_fuzzy"
+                            break
+
         segment_ids = item.get("source_segment_ids", [])
         if isinstance(segment_ids, list):
             segment_ids_str = json.dumps(segment_ids)
         else:
             segment_ids_str = None
+
         matched.append(
             {
                 "title": item.get("task", "未命名任务"),
                 "description": item.get("description"),
                 "executor_id": executor_id,
                 "executor_name": item.get("executor_name"),
+                "match_method": match_method,
                 "deadline": _parse_deadline(item.get("deadline_text")),
                 "source_segment_ids": segment_ids_str,
             }
         )
+
     state["matched_tasks"] = matched
     return state
 
 
 async def persist_tasks_node(state: AgentState, db: AsyncSession, meeting_id: int) -> AgentState:
+    """持久化任务并发送通知"""
+    from app.agents.task_notification import send_task_notifications
+
     created_ids: list[int] = []
+    created_tasks = []
+
     for item in state["matched_tasks"]:
         task = Task(
             title=item["title"],
@@ -158,7 +230,17 @@ async def persist_tasks_node(state: AgentState, db: AsyncSession, meeting_id: in
         db.add(task)
         await db.flush()
         created_ids.append(task.id)
+        created_tasks.append(task)
+
     state["created_task_ids"] = created_ids
+
+    # 发送任务通知（结合声纹识别 + AI姓名匹配的结果）
+    if created_tasks:
+        try:
+            await send_task_notifications(db, created_tasks)
+        except Exception as e:
+            state["errors"].append(f"Failed to send notifications: {str(e)}")
+
     return state
 
 

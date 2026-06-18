@@ -17,14 +17,21 @@ from app.database import Base
 
 
 class TaskStatus(str, enum.Enum):
-    pending = "pending"
-    accepted = "accepted"
-    rejected = "rejected"
-    in_progress = "in_progress"
-    completed = "completed"
-    incomplete = "incomplete"
-    overdue = "overdue"
-    escalated = "escalated"
+    pending = "pending"  # 待处理（初始状态）
+    accepted = "accepted"  # 已接受
+    rejected = "rejected"  # 已拒绝
+    in_progress = "in_progress"  # 进行中
+    completed = "completed"  # 已完成
+    incomplete = "incomplete"  # 未完成（需说明理由）
+    overdue = "overdue"  # 已逾期
+    escalated = "escalated"  # 已升级
+
+
+class MessageType(str, enum.Enum):
+    task_created = "task_created"  # 任务创建通知
+    task_reminder = "task_reminder"  # 任务到期提醒
+    task_escalation = "task_escalation"  # 任务升级通知
+    task_response = "task_response"  # 任务回复通知（接受/拒绝/完成等）
 
 
 class MeetingStatus(str, enum.Enum):
@@ -52,6 +59,8 @@ class Employee(Base):
     meetings: Mapped[list["Meeting"]] = relationship("Meeting", back_populates="creator")
     voice_prints: Mapped[list["VoicePrint"]] = relationship("VoicePrint", back_populates="employee")
     transcript_segments: Mapped[list["TranscriptSegment"]] = relationship("TranscriptSegment", back_populates="employee")
+    sent_messages: Mapped[list["Message"]] = relationship("Message", foreign_keys="[Message.sender_id]", back_populates="sender")
+    received_messages: Mapped[list["Message"]] = relationship("Message", foreign_keys="[Message.recipient_id]", back_populates="recipient")
 
 
 class Meeting(Base):
@@ -166,3 +175,39 @@ class VoicePrint(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     employee: Mapped["Employee"] = relationship("Employee", back_populates="voice_prints")
+
+
+class Message(Base):
+    """App 内消息表"""
+    __tablename__ = "messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    type: Mapped[MessageType] = mapped_column(Enum(MessageType, name="message_type"), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"), nullable=True, index=True)
+    sender_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"), nullable=True)
+    recipient_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), nullable=False, index=True)
+    action_token: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    action_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    task: Mapped["Task | None"] = relationship("Task")
+    sender: Mapped["Employee | None"] = relationship("Employee", foreign_keys=[sender_id])
+    recipient: Mapped["Employee"] = relationship("Employee", foreign_keys=[recipient_id])
+    actions: Mapped[list["MessageAction"]] = relationship("MessageAction", back_populates="message", cascade="all, delete-orphan")
+
+
+class MessageAction(Base):
+    """消息操作记录"""
+    __tablename__ = "message_actions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    message_id: Mapped[int] = mapped_column(ForeignKey("messages.id"), nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(20), nullable=False)  # accept, reject, complete, incomplete
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    message: Mapped["Message"] = relationship("Message", back_populates="actions")

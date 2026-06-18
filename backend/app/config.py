@@ -26,5 +26,17 @@ class Settings(BaseSettings):
     cors_origins: str = "*"
     mock_asr: bool = False
 
+    # Email settings
+    smtp_host: str = "smtp.example.com"
+    smtp_port: int = 587
+    smtp_user: str = "notifications@example.com"
+    smtp_password: str = ""
+    smtp_from_name: str = "TaskFlow System"
+    smtp_use_tls: bool = True
+    email_base_url: str = "http://192.168.10.8/api/tasks"
+
+    # Task notification settings
+    reminder_before_hours: int = 24  # 截止前多少小时发送提醒
+
 
 settings = Settings()

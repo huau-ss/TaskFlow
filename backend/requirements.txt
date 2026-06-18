@@ -20,4 +20,7 @@ langchain-core>=0.3.0
 langchain-openai>=0.2.0
 python-dateutil>=2.9.0
 email-validator>=2.2.0
+aiosqlite>=0.20.0
+pytest>=8.0.0
+pytest-asyncio>=0.24.0
 # bcrypt pinned above for passlib compatibility

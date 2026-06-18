@@ -2,7 +2,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, EmailStr, Field
 
-from app.models import MeetingStatus, TaskStatus
+from app.models import MeetingStatus, TaskStatus, MessageType
 
 
 # Auth
@@ -14,6 +14,7 @@ class LoginRequest(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    user: "EmployeeResponse"
 
 
 # Employee
@@ -183,3 +184,71 @@ class TranscriptWithSpeakers(BaseModel):
     meeting_id: int
     status: MeetingStatus
     segments: list[TranscriptSegmentWithSpeaker]
+
+
+# ==================== Message / 消息系统 ====================
+
+class MessageActionResponse(BaseModel):
+    id: int
+    action: str
+    reason: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class MessageResponse(BaseModel):
+    id: int
+    type: MessageType
+    title: str
+    content: str | None
+    task_id: int | None
+    sender_id: int | None
+    recipient_id: int
+    is_read: bool
+    read_at: datetime | None
+    created_at: datetime
+    actions: list[MessageActionResponse] = []
+
+    model_config = {"from_attributes": True}
+
+
+class MessageListResponse(BaseModel):
+    messages: list[MessageResponse]
+    unread_count: int
+    total: int
+
+
+class MessageCreate(BaseModel):
+    type: MessageType
+    title: str
+    content: str | None = None
+    task_id: int | None = None
+    recipient_id: int
+
+
+class TaskReplyRequest(BaseModel):
+    action: str = Field(..., description="操作类型: accept, reject, complete, incomplete")
+    reason: str | None = Field(None, description="拒绝或未完成的理由")
+
+
+class TaskReplyResponse(BaseModel):
+    success: bool
+    message: str
+    task: TaskResponse | None = None
+
+
+# ==================== Task / 任务管理 ====================
+
+class TaskDetailResponse(TaskResponse):
+    """任务详情，包含更多信息"""
+    executor_name: str | None = None
+    meeting_title: str | None = None
+    actions: list[MessageActionResponse] = []
+
+    model_config = {"from_attributes": True}
+
+
+class TaskListResponse(BaseModel):
+    tasks: list[TaskDetailResponse]
+    total: int

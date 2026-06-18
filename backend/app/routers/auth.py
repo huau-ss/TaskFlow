@@ -16,4 +16,8 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     token = create_access_token(user.email)
-    return TokenResponse(access_token=token)
+    from app.schemas import EmployeeResponse
+    return TokenResponse(
+        access_token=token,
+        user=EmployeeResponse.model_validate(user),
+    )

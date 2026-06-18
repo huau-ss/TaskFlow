@@ -1,5 +1,17 @@
-include: package:flutter_lints/flutter.yaml
+[tool.pytest.ini_options]
+test_paths = ["test"]
+asyncio_mode = "auto"
 
-linter:
-  rules:
-    prefer_const_constructors: false
+[tool.coverage.run]
+source = ["lib"]
+omit = ["lib/main.dart"]
+
+[tool.coverage.report]
+exclude_lines =
+  # Ignore these lines for coverage
+  abstract
+  pragma: no cover
+  def __repr__
+  raise AssertionError
+  raise NotImplementedError
+  if __name__ == .__main__.:
