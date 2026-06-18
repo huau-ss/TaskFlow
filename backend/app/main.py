@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.routers import auth, employees, meetings, voiceprints, messages, tasks
 from app.schemas import HealthResponse
-from app.services.health import check_asr_health, check_llm_health
+from app.services.health import check_asr_health, check_diarization_health, check_llm_health
 
 
 @asynccontextmanager
@@ -41,6 +41,7 @@ async def health():
         status="ok",
         asr_diarize_url=settings.asr_diarize_url,
         llm_url=settings.llm_url,
+        diarization_url=settings.diarization_url,
     )
 
 
@@ -48,4 +49,5 @@ async def health():
 async def health_services():
     asr = await check_asr_health()
     llm = await check_llm_health()
-    return {"asr": asr, "llm": llm}
+    diarization = await check_diarization_health()
+    return {"asr": asr, "llm": llm, "diarization": diarization}

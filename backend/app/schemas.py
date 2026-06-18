@@ -91,6 +91,8 @@ class TaskResponse(BaseModel):
     executor_id: int | None
     meeting_id: int | None
     source_segment_ids: str | None
+    match_method: str | None        # voiceprint / name_exact / name_fuzzy
+    match_confidence: float | None  # 0.0–1.0
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -106,6 +108,7 @@ class HealthResponse(BaseModel):
     status: str
     asr_diarize_url: str
     llm_url: str
+    diarization_url: str
 
 
 # VoicePrint / 声纹识别

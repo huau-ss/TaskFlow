@@ -13,6 +13,17 @@ async def check_asr_health() -> dict:
         return {"reachable": False, "error": str(exc)}
 
 
+async def check_diarization_health() -> dict:
+    """Check pyannote speaker diarization service (port 8004)."""
+    url = f"{settings.diarization_url}/health"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(url)
+            return {"reachable": True, "status_code": resp.status_code, "data": resp.json()}
+    except Exception as exc:
+        return {"reachable": False, "error": str(exc)}
+
+
 async def check_llm_health() -> dict:
     url = f"{settings.llm_url.rstrip('/')}/models"
     headers = {}

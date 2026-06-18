@@ -5,6 +5,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -113,6 +114,10 @@ class Task(Base):
     executor_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"), nullable=True)
     meeting_id: Mapped[int | None] = mapped_column(ForeignKey("meetings.id"), nullable=True)
     source_segment_ids: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 执行人匹配方式: "voiceprint" / "name_exact" / "name_fuzzy" / null
+    match_method: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # 匹配置信度 (0.0–1.0)，声纹为 cosine similarity，姓名为 1.0
+    match_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     executor: Mapped["Employee | None"] = relationship("Employee", back_populates="tasks")

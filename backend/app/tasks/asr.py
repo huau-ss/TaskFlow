@@ -1,3 +1,11 @@
+import asyncio
+import json
+import logging
+import re
+import subprocess
+import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import httpx
@@ -8,6 +16,8 @@ from sqlalchemy.orm import sessionmaker
 from app.config import settings
 from app.models import Meeting, MeetingStatus, TranscriptSegment
 from app.tasks.celery_app import celery_app
+
+logger = logging.getLogger(__name__)
 
 sync_engine = create_engine(settings.database_url_sync)
 SyncSession = sessionmaker(sync_engine)
@@ -89,12 +99,213 @@ def _mock_transcript_segments() -> list[dict]:
     ]
 
 
+# ============== Plan A: pyannote diarization preprocessing ==============
+
+
+def _call_diarization_api(audio_path: Path) -> dict | None:
+    """
+    调用 pyannote 说话人分离服务 (8004)，获取精准的说话人边界。
+
+    返回：
+        {
+            "segments": [{"speaker": "SPEAKER_00", "start": 0.5, "end": 12.3}, ...],
+            "num_speakers": 2,
+            "duration": 60.0
+        }
+    失败时返回 None（调用方应回退到 8002 联合模式）。
+    """
+    try:
+        with httpx.Client(timeout=600.0) as client:
+            with open(audio_path, "rb") as f:
+                resp = client.post(
+                    f"{settings.diarization_url}/api/diarize",
+                    files={"file": (audio_path.name, f, "audio/wav")},
+                    timeout=600.0,
+                )
+            resp.raise_for_status()
+            result = resp.json()
+            if result.get("segments"):
+                return result
+            logger.warning("Diarization 返回空 segments，回退到 8002 联合模式")
+            return None
+    except Exception as e:
+        logger.warning(f"Diarization 服务不可用 ({e})，回退到 8002 联合模式")
+        return None
+
+
+def _slice_audio(audio_path: Path, start: float, end: float) -> Path:
+    """
+    用 ffmpeg 从音频中截取指定时间段的片段。
+
+    Args:
+        audio_path: 原始音频路径
+        start: 开始时间（秒）
+        end: 结束时间（秒）
+
+    Returns:
+        截取后的 16kHz mono WAV 文件路径
+    """
+    duration = max(end - start, 0.5)  # 最短 0.5 秒
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+
+    result = subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-ss", str(start),
+            "-t", str(duration),
+            "-i", str(audio_path),
+            "-ar", "16000", "-ac", "1", "-f", "wav",
+            tmp_path,
+        ],
+        capture_output=True, timeout=30,
+    )
+    if result.returncode != 0:
+        Path(tmp_path).unlink(missing_ok=True)
+        raise RuntimeError(f"ffmpeg slice failed: {result.stderr.decode()}")
+
+    return Path(tmp_path)
+
+
+def _call_asr_transcribe(audio_path: Path) -> str:
+    """
+    对单个音频片段调用 8002 ASR 转写，返回纯文本。
+
+    与 _call_asr_api 不同，此函数专用于短音频片段（pyannote 切分后的单个说话人段落），
+    只关心转写文本，不关心说话人标注。支持 8002 的同步和异步两种模式。
+    """
+    if settings.mock_asr:
+        return "[Mock] 模拟转写文本"
+
+    with httpx.Client(timeout=600.0) as client:
+        with open(audio_path, "rb") as f:
+            resp = client.post(
+                settings.asr_diarize_url,
+                files={"env_audio": (audio_path.name, f, "audio/wav")},
+            )
+        resp.raise_for_status()
+
+        try:
+            data = resp.json()
+        except Exception:
+            # 可能是纯文本或 Markdown 返回
+            md_text = resp.text
+            parsed = _parse_markdown_transcript(md_text)
+            segments = _parse_asr_response(parsed)
+            return " ".join(s["text"] for s in segments if s["text"].strip()) or md_text.strip()
+
+        # 同步模式：直接返回了 segments 或 text
+        if "segments" in data or "utterances" in data or "results" in data or "text" in data:
+            segments = _parse_asr_response(data)
+            return " ".join(s["text"] for s in segments if s["text"].strip())
+
+        # 异步模式：轮询等待结果
+        task_id = data.get("task_id")
+        if not task_id:
+            # 未知格式，尽力提取文本
+            segments = _parse_asr_response(data)
+            return " ".join(s["text"] for s in segments if s["text"].strip())
+
+        base_url = settings.asr_diarize_url.rsplit("/api", 1)[0]
+        for _ in range(200):  # 最多等待 ~10 分钟
+            time.sleep(3)
+            status_resp = client.get(f"{base_url}/api/status/{task_id}")
+            status_resp.raise_for_status()
+            status_data = status_resp.json()
+            status = status_data.get("status", "")
+
+            if status == "failed":
+                raise Exception(f"ASR 失败: {status_data.get('error', 'unknown')}")
+
+            if status in ("done", "completed"):
+                result_resp = client.get(f"{base_url}/api/result/{task_id}")
+                result_resp.raise_for_status()
+
+                try:
+                    result_data = result_resp.json()
+                    segments = _parse_asr_response(result_data)
+                    return " ".join(s["text"] for s in segments if s["text"].strip())
+                except Exception:
+                    md_text = result_resp.text
+                    parsed = _parse_markdown_transcript(md_text)
+                    segments = _parse_asr_response(parsed)
+                    return " ".join(s["text"] for s in segments if s["text"].strip()) or md_text.strip()
+
+        raise Exception("ASR 转写超时")
+
+
+def _transcribe_segments_parallel(audio_path: Path, diar_segments: list[dict]) -> list[dict]:
+    """
+    对 pyannote 分割的每个说话人段落，并行执行 ASR 转写。
+
+    Args:
+        audio_path: 原始音频文件路径
+        diar_segments: pyannote 返回的 segments 列表
+
+    Returns:
+        带有 text 的完整 segment 列表（与 _parse_asr_response 输出格式兼容）
+    """
+    n = len(diar_segments)
+    logger.info(f"并行转写 {n} 个说话人段落（最多 4 路并发）...")
+
+    results: list[dict | None] = [None] * n
+
+    def process_one(idx: int, seg: dict) -> tuple[int, dict]:
+        sliced_path = None
+        try:
+            sliced_path = _slice_audio(audio_path, seg["start"], seg["end"])
+            text = _call_asr_transcribe(sliced_path)
+            return idx, {
+                "speaker_label": seg["speaker"],
+                "text": text,
+                "start_time": seg["start"],
+                "end_time": seg["end"],
+                "embedding": None,  # 稍后由 _recognize_meeting_speakers 提取
+                "sequence": idx,
+            }
+        except Exception as e:
+            logger.warning(f"段落 {idx} ({seg['speaker']}, {seg['start']:.1f}s–{seg['end']:.1f}s) ASR 失败: {e}")
+            return idx, {
+                "speaker_label": seg["speaker"],
+                "text": "",
+                "start_time": seg["start"],
+                "end_time": seg["end"],
+                "embedding": None,
+                "sequence": idx,
+            }
+        finally:
+            if sliced_path:
+                try:
+                    sliced_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(process_one, i, seg): i
+            for i, seg in enumerate(diar_segments)
+        }
+        for future in as_completed(futures):
+            idx, result = future.result()
+            results[idx] = result
+
+    # 过滤掉 None 和文本为空的段落
+    filtered = [r for r in results if r is not None]
+    valid = [r for r in filtered if r["text"].strip()]
+    none_count = sum(1 for r in results if r is None)
+    if none_count:
+        logger.warning(f"{none_count}/{n} 个段落的转写结果丢失（future 未完成）")
+    logger.info(f"并行转写完成: {len(valid)}/{n} 个段落有有效文本")
+    return filtered
+
+
+# ============== 原有 ASR 调用（回退路径） ==============
+
+
 def _call_asr_api(audio_path: Path) -> dict | list:
     if settings.mock_asr:
         return {"segments": _mock_transcript_segments()}
-
-    import re
-    import time
 
     with httpx.Client(timeout=600.0) as client:
         # 上传音频到 ASR 服务
@@ -149,7 +360,6 @@ def _call_asr_api(audio_path: Path) -> dict | list:
 
 def _parse_markdown_transcript(md_text: str) -> dict:
     """解析 8002 返回的 Markdown 格式转写文本"""
-    import re
 
     segments = []
     # 匹配 [HH:MM:SS] 或 [MM:SS] + **说话人 X**：内容
@@ -226,8 +436,6 @@ def _recognize_speaker(db, embedding: list[float]) -> tuple[int | None, float]:
     """
     识别说话人，返回 (employee_id, confidence)
     """
-    import json
-
     from sqlalchemy import select
     from app.models import VoicePrint
 
@@ -291,10 +499,6 @@ def _extract_speaker_embedding_from_audio(
 
 def _extract_segment_embedding(audio_path: Path, start_time: float | None, end_time: float | None) -> list[float] | None:
     """从完整音频中截取片段，调用本地 embedding 服务提取声纹向量"""
-    import subprocess
-    import tempfile
-    import httpx
-
     if start_time is None:
         return None
 
@@ -387,7 +591,21 @@ def _recognize_meeting_speakers(db, meeting_id: int, segments: list[dict], audio
 
 
 def run_transcribe_meeting(meeting_id: int) -> dict:
-    """Core ASR pipeline: read audio from NAS, call :8002, persist transcript_segments."""
+    """
+    Plan A: pyannote diarization (8004) → 音频切片 → 每段 8002 ASR → 8003 embedding → 声纹匹配
+
+    流程：
+    1. 调用 pyannote (8004) 获取精准说话人边界
+    2. 按 pyannote 边界用 ffmpeg 切分音频
+    3. 每段分别送入 8002 ASR 转写（4 路并发）
+    4. 每段送入 8003 提取声纹 embedding
+    5. 声纹与员工匹配
+    6. 持久化 TranscriptSegment
+
+    如果 pyannote 不可用，自动回退到 8002 联合模式。
+    """
+    pipeline_mode = "unknown"  # 记录使用哪种模式
+
     with SyncSession() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
@@ -404,21 +622,45 @@ def run_transcribe_meeting(meeting_id: int) -> dict:
             return {"error": meeting.asr_error}
 
         try:
-            data = _call_asr_api(audio_path)
+            # ─── Step 1: 尝试 pyannote 说话人分离 ───
+            diar_result = _call_diarization_api(audio_path)
+
+            if diar_result and diar_result.get("segments"):
+                # ✅ Plan A: pyannote 精准边界 → 切片 → 并行 ASR
+                pipeline_mode = "pyannote+asr"
+                logger.info(
+                    f"会议 {meeting_id}: 使用 Plan A (pyannote 说话人分离), "
+                    f"{diar_result['num_speakers']} 个说话人, "
+                    f"{len(diar_result['segments'])} 个段落"
+                )
+                all_segments = _transcribe_segments_parallel(
+                    audio_path, diar_result["segments"]
+                )
+            else:
+                # ⚠️ 回退：8002 联合模式（ASR + 说话人标注一起做）
+                pipeline_mode = "asr-fallback"
+                logger.info(f"会议 {meeting_id}: pyannote 不可用, 回退到 8002 联合模式")
+                data = _call_asr_api(audio_path)
+                all_segments = _parse_asr_response(data)
+
         except Exception as exc:
             meeting.status = MeetingStatus.failed
             meeting.asr_error = str(exc)
             db.commit()
             return {"error": str(exc)}
 
-        segments = _parse_asr_response(data)
-        
-        # 进行说话人识别（传入音频路径用于本地声纹提取）
-        recognized_segments = _recognize_meeting_speakers(db, meeting_id, segments, audio_path=audio_path)
-        
-        # 删除旧的转写片段
-        db.execute(delete(TranscriptSegment).where(TranscriptSegment.meeting_id == meeting_id))
-        
+        # ─── Step 2: 声纹识别（每段 → 8003 embedding → 员工匹配）───
+        recognized_segments = _recognize_meeting_speakers(
+            db, meeting_id, all_segments, audio_path=audio_path
+        )
+
+        # ─── Step 3: 持久化 TranscriptSegment ───
+        db.execute(
+            delete(TranscriptSegment).where(
+                TranscriptSegment.meeting_id == meeting_id
+            )
+        )
+
         for seg in recognized_segments:
             if not seg["text"].strip():
                 continue
@@ -426,7 +668,7 @@ def run_transcribe_meeting(meeting_id: int) -> dict:
                 TranscriptSegment(
                     meeting_id=meeting_id,
                     speaker_label=seg["speaker_label"],
-                    employee_id=seg.get("employee_id"),  # 识别出的员工 ID
+                    employee_id=seg.get("employee_id"),
                     text=seg["text"],
                     start_time=seg.get("start_time"),
                     end_time=seg.get("end_time"),
@@ -438,11 +680,10 @@ def run_transcribe_meeting(meeting_id: int) -> dict:
         meeting.asr_error = None
         db.commit()
 
-        # 自动触发任务提取 + 通知推送
+        # ─── Step 4: 自动任务提取 + 通知推送 ───
         tasks_created = 0
         notifications_sent = 0
         try:
-            import asyncio
             from app.agents.task_extract import run_task_extraction
             from app.agents.task_notification import send_task_notifications
 
@@ -454,7 +695,6 @@ def run_transcribe_meeting(meeting_id: int) -> dict:
                         if not fresh_meeting:
                             return 0, 0
 
-                        # 重新加载 segments 关系
                         from sqlalchemy import select as sa_select
                         from sqlalchemy.orm import selectinload
                         result = await adb.execute(
@@ -476,15 +716,23 @@ def run_transcribe_meeting(meeting_id: int) -> dict:
                         await adb.rollback()
                         return 0, 0
 
-            tasks_created, notifications_sent = asyncio.run(_auto_extract_and_notify())
-            logger.info(f"会议 {meeting_id}: 提取 {tasks_created} 个任务, 发送 {notifications_sent} 条通知")
+            tasks_created, notifications_sent = asyncio.run(
+                _auto_extract_and_notify()
+            )
+            logger.info(
+                f"会议 {meeting_id}: 提取 {tasks_created} 个任务, "
+                f"发送 {notifications_sent} 条通知"
+            )
         except Exception as e:
             logger.warning(f"自动任务提取/通知失败: {e}")
 
         return {
             "meeting_id": meeting_id,
-            "segments": len(segments),
-            "recognized_speakers": sum(1 for s in recognized_segments if s.get("employee_id")),
+            "pipeline_mode": pipeline_mode,
+            "segments": len(all_segments),
+            "recognized_speakers": sum(
+                1 for s in recognized_segments if s.get("employee_id")
+            ),
             "tasks_created": tasks_created,
             "notifications_sent": notifications_sent,
         }

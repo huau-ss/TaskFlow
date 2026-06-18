@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     llm_api_key: str = "not-needed"
 
     embedding_url: str = "http://localhost:8003"
+    diarization_url: str = "http://localhost:8004"
 
     nas_path: str = "./data/nas/meetings"
     api_host: str = "0.0.0.0"
