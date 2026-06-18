@@ -11,7 +11,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision = '004_add_messages'
-down_revision = '003_add_is_admin'
+down_revision = '003'
 branch_labels = None
 depends_on = None
 
@@ -28,7 +28,7 @@ def upgrade() -> None:
     op.create_table(
         'messages',
         sa.Column('id', sa.Integer(), nullable=False),
-        sa.Column('type', sa.Enum('task_created', 'task_reminder', 'task_escalation', 'task_response', name='message_type'), nullable=False),
+        sa.Column('type', message_type, nullable=False),
         sa.Column('title', sa.String(length=255), nullable=False),
         sa.Column('content', sa.Text(), nullable=True),
         sa.Column('task_id', sa.Integer(), nullable=True),

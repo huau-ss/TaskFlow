@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from app.agents.escalation import auto_escalate_overdue_tasks, escalate_task_to_top
 from app.config import settings
-from app.database import async_session_maker
+from app.database import async_session as async_session_maker
 from app.models import Task, TaskStatus
 from app.services.message import create_reminder_message
 
