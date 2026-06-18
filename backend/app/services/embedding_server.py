@@ -164,18 +164,34 @@ async def extract_embeddings(file: UploadFile = File(...)):
     """
     content = await file.read()
     suffix = Path(file.filename or "audio.wav").suffix or ".wav"
+    wav_path = None
+
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(content)
         tmp_path = tmp.name
 
     try:
-        embedding, duration = extract_embedding(tmp_path)
+        # 如果不是 WAV 或 soundfile 无法直接读取，用 ffmpeg 转换为 16kHz mono WAV
+        wav_path = tmp_path + ".wav"
+        import subprocess
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", tmp_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode == 0 and Path(wav_path).exists():
+            embedding, duration = extract_embedding(wav_path)
+        else:
+            # ffmpeg 失败时尝试直接读取（可能已经是 WAV）
+            embedding, duration = extract_embedding(tmp_path)
+
         return {"embedding": embedding, "duration": duration}
     except Exception as e:
         logger.error(f"Embedding extraction failed: {e}")
         raise
     finally:
         Path(tmp_path).unlink(missing_ok=True)
+        if wav_path:
+            Path(wav_path).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
