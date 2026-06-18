@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../services/upload_queue.dart';
 
@@ -18,8 +20,6 @@ class _UploadQueueScreenState extends State<UploadQueueScreen> with WidgetsBindi
   List<Map<String, dynamic>> _items = [];
   Timer? _refreshTimer;
   bool _isSelectingFile = false;
-  
-  static const _pickerChannel = MethodChannel('com.taskflow/document_picker');
 
   @override
   void initState() {
@@ -53,16 +53,26 @@ class _UploadQueueScreenState extends State<UploadQueueScreen> with WidgetsBindi
     setState(() => _isSelectingFile = true);
 
     try {
-      final result = await _pickerChannel.invokeMethod<Map<dynamic, dynamic>>('pickAudioFile');
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.audio,
+        allowMultiple: false,
+      );
 
-      if (result != null) {
-        final path = result['path'] as String?;
-        final name = result['name'] as String?;
-        
-        if (path != null) {
-          final title = await _showTitleDialog(fileName: name ?? '音频文件');
+      if (result != null && result.files.isNotEmpty) {
+        final picked = result.files.first;
+
+        // Android 上 path 可能为 null（content:// URI），需要把 bytes 写到临时文件
+        String? filePath = picked.path;
+        if (filePath == null && picked.bytes != null) {
+          final dir = await getTemporaryDirectory();
+          filePath = '${dir.path}/pick_${DateTime.now().millisecondsSinceEpoch}_${picked.name}';
+          await File(filePath).writeAsBytes(picked.bytes!);
+        }
+
+        if (filePath != null) {
+          final title = await _showTitleDialog(fileName: picked.name);
           await widget.uploadQueue.enqueue(
-            localPath: path,
+            localPath: filePath,
             title: title,
           );
           if (!mounted) return;
@@ -72,11 +82,6 @@ class _UploadQueueScreenState extends State<UploadQueueScreen> with WidgetsBindi
           _refresh();
         }
       }
-    } on PlatformException catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('选择文件失败: ${e.message}')),
-      );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
