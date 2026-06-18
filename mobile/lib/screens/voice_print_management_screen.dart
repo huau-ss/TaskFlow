@@ -126,10 +126,29 @@ class _VoicePrintManagementScreenState extends State<VoicePrintManagementScreen>
         allowMultiple: false,
       );
       if (result != null && result.files.isNotEmpty) {
-        final file = result.files.first;
+        final picked = result.files.first;
+
+        // Android 上 FilePicker 可能返回 content:// URI，path 为 null
+        // 需要把 bytes 写到临时文件
+        String? filePath = picked.path;
+        if (filePath == null && picked.bytes != null) {
+          final dir = await getTemporaryDirectory();
+          filePath = '${dir.path}/pick_${DateTime.now().millisecondsSinceEpoch}_${picked.name}';
+          await File(filePath).writeAsBytes(picked.bytes!);
+        }
+
+        if (filePath == null) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('无法读取文件路径')),
+            );
+          }
+          return;
+        }
+
         setState(() {
-          _uploadFilePath = file.path;
-          _uploadFileName = file.name;
+          _uploadFilePath = filePath;
+          _uploadFileName = picked.name;
         });
       }
     } catch (e) {
