@@ -68,44 +68,57 @@ class _VoicePrintManagementScreenState extends State<VoicePrintManagementScreen>
       _voicePrints = await widget.api.getEmployeeVoicePrints(int.parse(_selectedEmployeeId!));
     } catch (e) {
       _voicePrints = [];
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('加载声纹列表失败: $e')),
+        );
+      }
     }
     if (mounted) setState(() {});
   }
 
   Future<void> _startRecording() async {
-    final status = await Permission.microphone.request();
-    if (!status.isGranted) {
+    try {
+      final status = await Permission.microphone.request();
+      if (!status.isGranted) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('需要麦克风权限')),
+          );
+        }
+        return;
+      }
+
+      final dir = await getTemporaryDirectory();
+      _recordingPath = '${dir.path}/voiceprint_${DateTime.now().millisecondsSinceEpoch}.wav';
+
+      _recorder ??= AudioRecorder();
+      await _recorder!.start(
+        const RecordConfig(encoder: AudioEncoder.wav, sampleRate: 16000, numChannels: 1),
+        path: _recordingPath!,
+      );
+
+      _recordingTimer?.cancel();
+
+      setState(() {
+        _recording = true;
+        _recordingSeconds = 0;
+      });
+
+      _recordingTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+        setState(() => _recordingSeconds++);
+        // 自动停止：30秒
+        if (_recordingSeconds >= 30) {
+          _stopRecording();
+        }
+      });
+    } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('需要麦克风权限')),
+          SnackBar(content: Text('启动录音失败: $e')),
         );
       }
-      return;
     }
-
-    final dir = await getTemporaryDirectory();
-    _recordingPath = '${dir.path}/voiceprint_${DateTime.now().millisecondsSinceEpoch}.wav';
-
-    _recorder ??= AudioRecorder();
-    await _recorder!.start(
-      const RecordConfig(encoder: AudioEncoder.wav, sampleRate: 16000, numChannels: 1),
-      path: _recordingPath!,
-    );
-
-    _recordingTimer?.cancel();
-
-    setState(() {
-      _recording = true;
-      _recordingSeconds = 0;
-    });
-
-    _recordingTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      setState(() => _recordingSeconds++);
-      // 自动停止：30秒
-      if (_recordingSeconds >= 30) {
-        _stopRecording();
-      }
-    });
   }
 
   Future<void> _stopRecording() async {
@@ -161,7 +174,14 @@ class _VoicePrintManagementScreenState extends State<VoicePrintManagementScreen>
   }
 
   Future<void> _uploadPickedFile() async {
-    if (_uploadFilePath == null || _selectedEmployeeId == null) return;
+    if (_uploadFilePath == null || _selectedEmployeeId == null) {
+      if (mounted && _selectedEmployeeId == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('请先选择员工')),
+        );
+      }
+      return;
+    }
 
     final file = File(_uploadFilePath!);
     if (!await file.exists()) {
@@ -206,7 +226,14 @@ class _VoicePrintManagementScreenState extends State<VoicePrintManagementScreen>
   }
 
   Future<void> _uploadVoicePrint() async {
-    if (_recordingPath == null || _selectedEmployeeId == null) return;
+    if (_recordingPath == null || _selectedEmployeeId == null) {
+      if (mounted && _selectedEmployeeId == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('请先选择员工')),
+        );
+      }
+      return;
+    }
 
     final file = File(_recordingPath!);
     if (!await file.exists()) {
