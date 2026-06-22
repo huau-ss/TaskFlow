@@ -223,26 +223,13 @@ async def transcribe(file: UploadFile = File(...)):
         num_speakers = 1
         if len(embeddings) >= 2 and len(embeddings) == len(segments):
             emb_matrix = np.array(embeddings)
-            # 确定聚类数
-            max_spk = min(10, len(embeddings))
-            if max_spk >= 2:
-                best_score = -1
-                for n in range(2, max_spk + 1):
-                    clustering = AgglomerativeClustering(
-                        n_clusters=n, metric="cosine", linkage="average"
-                    )
-                    labels = clustering.fit_predict(emb_matrix)
-                    # 分数：每个簇的紧凑度
-                    score = 0
-                    for lbl in set(labels):
-                        cluster_embs = emb_matrix[labels == lbl]
-                        if len(cluster_embs) > 1:
-                            centroid = cluster_embs.mean(axis=0, keepdims=True)
-                            sims = 1 - np.linalg.norm(cluster_embs - centroid, axis=1)
-                            score += sims.sum()
-                    if score > best_score:
-                        best_score = score
-                        num_speakers = n
+            n_segments = len(segments)
+
+            # 启发式：短会议（< 3 分钟）大概率 2 人，强制 2 聚类
+            if n_segments >= 3:
+                num_speakers = min(2, n_segments)
+            else:
+                num_speakers = 1
 
             clustering = AgglomerativeClustering(
                 n_clusters=num_speakers, metric="cosine", linkage="average"

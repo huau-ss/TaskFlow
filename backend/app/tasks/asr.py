@@ -516,6 +516,7 @@ def _recognize_speaker(
     # 逐个员工计算相似度并记录
     best_employee_id = None
     best_similarity = 0.0
+    second_similarity = 0.0
     all_scores: list[tuple[int, float]] = []
 
     for emp_id, embeddings in employee_embeddings.items():
@@ -524,27 +525,35 @@ def _recognize_speaker(
         all_scores.append((emp_id, round(similarity, 4)))
 
         if similarity > best_similarity:
+            second_similarity = best_similarity
             best_similarity = similarity
             best_employee_id = emp_id
+        elif similarity > second_similarity:
+            second_similarity = similarity
 
-    # 日志：输出所有员工的相似度
+    # 日志
     scores_str = ", ".join(
         f"员工#{eid}={score:.4f}" for eid, score in all_scores
     )
-    MIN_THRESHOLD = 0.5
+    gap = best_similarity - second_similarity
+    ABS_THRESHOLD = 0.3   # 绝对阈值（宽松）
+    REL_GAP = 0.10        # 相对差距（第一名必须比第二名高这么多）
 
-    if best_similarity < MIN_THRESHOLD:
+    # 决策：绝对分数高  OR  相对差距显著
+    if best_similarity >= ABS_THRESHOLD or gap >= REL_GAP:
         logger.info(
-            f"[声纹识别] {context}: 最佳匹配 员工#{best_employee_id}={best_similarity:.4f} "
-            f"低于阈值 {MIN_THRESHOLD}，拒绝识别 | 所有分数: {scores_str}"
+            f"[声纹识别] {context}: 命中 员工#{best_employee_id} "
+            f"相似度={best_similarity:.4f} gap={gap:.4f} "
+            f"(阈值 abs={ABS_THRESHOLD} rel={REL_GAP}) | 所有分数: {scores_str}"
         )
-        return None, best_similarity
+        return best_employee_id, best_similarity
 
     logger.info(
-        f"[声纹识别] {context}: 命中 员工#{best_employee_id} "
-        f"相似度={best_similarity:.4f} (阈值={MIN_THRESHOLD}) | 所有分数: {scores_str}"
+        f"[声纹识别] {context}: 拒绝 — "
+        f"最佳 员工#{best_employee_id}={best_similarity:.4f} gap={gap:.4f} "
+        f"不满足 abs>{ABS_THRESHOLD} 或 rel_gap>{REL_GAP} | 所有分数: {scores_str}"
     )
-    return best_employee_id, best_similarity
+    return None, best_similarity
 
 
 def _extract_speaker_embedding_from_audio(
@@ -622,29 +631,45 @@ def _recognize_meeting_speakers(
     """
     对会议的每个片段进行说话人识别。
 
-    FunASR 已返回 CAM++ embedding（与注册声纹同空间），直接用余弦相似度匹配。
-    不再需要音频切片 + 8003 MFCC 提取。
+    策略：先按 speaker_label 聚合 CAM++ embedding（取均值），
+    用聚合后的 embedding 匹配声纹，再回填到所有同 label 的 segment。
+
+    逐段匹配噪音大（短片段 embedding 不稳定），聚合后信噪比更高。
     """
-    logger.info(f"[声纹识别] 开始处理 {len(segments)} 个 segment (CAM++ 直接匹配)")
+    logger.info(f"[声纹识别] 开始处理 {len(segments)} 个 segment (聚合匹配)")
+
+    # ── Step 1: 按 speaker_label 聚合 embedding ──
+    from collections import defaultdict
+    speaker_embeddings: dict[str, list[list[float]]] = defaultdict(list)
+    for seg in segments:
+        emb = seg.get("embedding")
+        if emb and isinstance(emb, list) and len(emb) > 0:
+            speaker_embeddings[seg.get("speaker_label", "?")].append(emb)
+
+    # ── Step 2: 每个说话人取平均 embedding，一次性匹配 ──
+    speaker_match: dict[str, tuple[int | None, float]] = {}
+    for spk, embs in speaker_embeddings.items():
+        avg_emb = np.mean(embs, axis=0).tolist()
+        total_dur = sum(
+            (s.get("end_time") or 0) - (s.get("start_time") or 0)
+            for s in segments if s.get("speaker_label") == spk
+        )
+        ctx = f"{spk} ({len(embs)}段, {total_dur:.1f}s)"
+        employee_id, confidence = _recognize_speaker(db, avg_emb, context=ctx)
+        speaker_match[spk] = (employee_id, confidence)
+        logger.info(
+            f"[声纹识别] {ctx}: → 员工#{employee_id} 置信度={confidence:.4f}"
+        )
+
+    # ── Step 3: 回填到每个 segment ──
     recognized_segments = []
     for seg in segments:
-        embedding = seg.get("embedding")
-        seq = seg.get("sequence", "?")
         spk = seg.get("speaker_label", "?")
-        st = seg.get("start_time")
-        et = seg.get("end_time")
-        ctx = f"seg#{seq} {spk} {st}s–{et}s"
-
-        if embedding and isinstance(embedding, list) and len(embedding) > 0:
-            employee_id, confidence = _recognize_speaker(db, embedding, context=ctx)
-        else:
-            logger.info(f"[声纹识别] {ctx}: 无 CAM++ embedding，跳过匹配")
-            employee_id, confidence = None, 0.0
-
+        eid, conf = speaker_match.get(spk, (None, 0.0))
         recognized_segments.append({
             **seg,
-            "employee_id": employee_id,
-            "confidence": confidence
+            "employee_id": eid,
+            "confidence": conf,
         })
 
     return recognized_segments
@@ -664,8 +689,11 @@ def run_transcribe_meeting(meeting_id: int) -> dict:
 
     如果 pyannote 不可用，自动回退到 8002 联合模式。
     """
-    pipeline_mode = "unknown"  # 记录使用哪种模式
+    pipeline_mode = "unknown"
+    recognized_segments: list[dict] = []
+    all_segments: list[dict] = []
 
+    # ── Phase 1: 转写 + 声纹识别 + 持久化（sync session）──
     with SyncSession() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
@@ -682,7 +710,7 @@ def run_transcribe_meeting(meeting_id: int) -> dict:
             return {"error": meeting.asr_error}
 
         try:
-            # ─── Step 1: FunASR 统一转写 (VAD + ASR + CAM++ embedding + 说话人聚类) ───
+            # Step 1: FunASR 统一转写
             pipeline_mode = "funasr"
             logger.info(f"会议 {meeting_id}: 调用 FunASR 统一转写...")
             funasr_result = _call_funasr_transcribe(audio_path)
@@ -691,100 +719,93 @@ def run_transcribe_meeting(meeting_id: int) -> dict:
                 f"会议 {meeting_id}: FunASR 返回 {len(all_segments)} 段, "
                 f"{funasr_result.get('num_speakers', '?')} 说话人"
             )
-
         except Exception as exc:
             meeting.status = MeetingStatus.failed
             meeting.asr_error = f"FunASR 转写失败: {exc}"
             db.commit()
             return {"error": str(exc)}
 
-        # ─── Step 2: 声纹识别（用 FunASR 返回的 CAM++ embedding 直接匹配）───
+        # Step 2: 声纹识别
         recognized_segments = _recognize_meeting_speakers(
             db, meeting_id, all_segments
         )
 
-        # ─── Step 3: 持久化 TranscriptSegment ───
+        # Step 3: 持久化
         db.execute(
             delete(TranscriptSegment).where(
                 TranscriptSegment.meeting_id == meeting_id
             )
         )
-
         for seg in recognized_segments:
             if not seg["text"].strip():
                 continue
-            db.add(
-                TranscriptSegment(
-                    meeting_id=meeting_id,
-                    speaker_label=seg["speaker_label"],
-                    employee_id=seg.get("employee_id"),
-                    text=seg["text"],
-                    start_time=seg.get("start_time"),
-                    end_time=seg.get("end_time"),
-                    sequence=seg["sequence"],
-                )
-            )
+            db.add(TranscriptSegment(
+                meeting_id=meeting_id,
+                speaker_label=seg["speaker_label"],
+                employee_id=seg.get("employee_id"),
+                text=seg["text"],
+                start_time=seg.get("start_time"),
+                end_time=seg.get("end_time"),
+                sequence=seg["sequence"],
+            ))
 
         meeting.status = MeetingStatus.transcribed
         meeting.asr_error = None
         db.commit()
+    # ── sync session closed here ──
 
-        # ─── Step 4: 自动任务提取 + 通知推送 ───
-        tasks_created = 0
-        notifications_sent = 0
-        try:
-            from app.agents.task_extract import run_task_extraction
-            from app.agents.task_notification import send_task_notifications
+    # ── Phase 2: 任务提取 + 通知（async session，完全独立）──
+    tasks_created = 0
+    notifications_sent = 0
+    try:
+        from app.agents.task_extract import run_task_extraction
+        from app.agents.task_notification import send_task_notifications
 
-            async def _auto_extract_and_notify():
-                from app.database import async_session
-                async with async_session() as adb:
-                    try:
-                        fresh_meeting = await adb.get(Meeting, meeting_id)
-                        if not fresh_meeting:
-                            return 0, 0
-
-                        from sqlalchemy import select as sa_select
-                        from sqlalchemy.orm import selectinload
-                        result = await adb.execute(
-                            sa_select(Meeting)
-                            .options(selectinload(Meeting.segments))
-                            .where(Meeting.id == meeting_id)
-                        )
-                        fresh_meeting = result.scalar_one_or_none()
-                        if not fresh_meeting or not fresh_meeting.segments:
-                            return 0, 0
-
-                        tasks = await run_task_extraction(adb, fresh_meeting)
-                        await adb.commit()
-
-                        msg_count = await send_task_notifications(adb, tasks)
-                        return len(tasks), msg_count
-                    except Exception as e:
-                        logger.warning(f"自动任务提取失败: {e}")
-                        await adb.rollback()
+        async def _auto_extract_and_notify():
+            from app.database import async_session
+            async with async_session() as adb:
+                try:
+                    from sqlalchemy import select as sa_select
+                    from sqlalchemy.orm import selectinload
+                    result = await adb.execute(
+                        sa_select(Meeting)
+                        .options(selectinload(Meeting.segments))
+                        .where(Meeting.id == meeting_id)
+                    )
+                    fresh_meeting = result.scalar_one_or_none()
+                    if not fresh_meeting or not fresh_meeting.segments:
                         return 0, 0
 
-            tasks_created, notifications_sent = asyncio.run(
-                _auto_extract_and_notify()
-            )
-            logger.info(
-                f"会议 {meeting_id}: 提取 {tasks_created} 个任务, "
-                f"发送 {notifications_sent} 条通知"
-            )
-        except Exception as e:
-            logger.warning(f"自动任务提取/通知失败: {e}")
+                    tasks = await run_task_extraction(adb, fresh_meeting)
+                    await adb.commit()
 
-        return {
-            "meeting_id": meeting_id,
-            "pipeline_mode": pipeline_mode,
-            "segments": len(all_segments),
-            "recognized_speakers": sum(
-                1 for s in recognized_segments if s.get("employee_id")
-            ),
-            "tasks_created": tasks_created,
-            "notifications_sent": notifications_sent,
-        }
+                    msg_count = await send_task_notifications(adb, tasks)
+                    return len(tasks), msg_count
+                except Exception as e:
+                    logger.warning(f"自动任务提取失败: {e}")
+                    await adb.rollback()
+                    return 0, 0
+
+        tasks_created, notifications_sent = asyncio.run(
+            _auto_extract_and_notify()
+        )
+        logger.info(
+            f"会议 {meeting_id}: 提取 {tasks_created} 个任务, "
+            f"发送 {notifications_sent} 条通知"
+        )
+    except Exception as e:
+        logger.warning(f"自动任务提取/通知失败: {e}")
+
+    return {
+        "meeting_id": meeting_id,
+        "pipeline_mode": pipeline_mode,
+        "segments": len(all_segments),
+        "recognized_speakers": sum(
+            1 for s in recognized_segments if s.get("employee_id")
+        ),
+        "tasks_created": tasks_created,
+        "notifications_sent": notifications_sent,
+    }
 
 
 @celery_app.task(name="transcribe_meeting", bind=True, max_retries=3)
