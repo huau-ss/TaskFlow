@@ -507,10 +507,10 @@ def _extract_speaker_embedding_from_audio(
 
 
 def _extract_segment_embedding(audio_path: Path, start_time: float | None, end_time: float | None) -> list[float] | None:
-    """从完整音频中截取片段，通过 8002 ASR 服务提取 CAM++ 声纹向量（与注册声纹同空间）。
+    """从完整音频中截取片段，调用本地 8003 embedding 服务提取 MFCC 声纹向量。
 
-    注意：8002 没有独立的 /api/embeddings 端点，embedding 嵌入在 /api/transcribe 响应的
-    每个 segment 中。此函数切片后调用 8002 转写接口，从响应中提取 embedding。
+    注意：8002 只对多人会议输出 CAM++ embedding，单人切片不适用。
+    改用 8003 MFCC —— 稳定且与注册同空间。
     """
     if start_time is None:
         return None
@@ -520,6 +520,8 @@ def _extract_segment_embedding(audio_path: Path, start_time: float | None, end_t
         duration = end_time - start_time
     else:
         duration = 5.0  # 默认截取 5 秒
+
+    embedding_url = getattr(settings, "embedding_url", "http://localhost:8003")
 
     try:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -541,51 +543,16 @@ def _extract_segment_embedding(audio_path: Path, start_time: float | None, end_t
         if result.returncode != 0 or not Path(tmp_path).exists():
             return None
 
-        # 调用 8002 转写接口获取 CAM++ embedding（与注册声纹同空间）
+        # 调用本地 8003 embedding 服务（MFCC 256-dim，与注册同空间）
         with open(tmp_path, "rb") as f:
             resp = httpx.post(
-                settings.asr_diarize_url,
-                files={"env_audio": ("segment.wav", f, "audio/wav")},
-                timeout=60.0,
+                f"{embedding_url}/api/embeddings",
+                files={"file": ("segment.wav", f, "audio/wav")},
+                timeout=30.0,
             )
         resp.raise_for_status()
         data = resp.json()
-
-        # 从响应中提取 embedding（8002 可能同步或异步返回）
-        # 尝试同步格式
-        segments = _parse_asr_response(data)
-        for s in segments:
-            emb = s.get("embedding")
-            if emb and isinstance(emb, list) and len(emb) > 0:
-                return emb
-
-        # 异步模式：简单轮询
-        task_id = data.get("task_id")
-        if task_id:
-            base_url = settings.asr_diarize_url.rsplit("/api", 1)[0]
-            with httpx.Client(timeout=120.0) as client:
-                for _ in range(60):
-                    time.sleep(2)
-                    sr = client.get(f"{base_url}/api/status/{task_id}")
-                    sr.raise_for_status()
-                    sd = sr.json()
-                    if sd.get("status") == "failed":
-                        break
-                    if sd.get("status") in ("done", "completed"):
-                        rr = client.get(f"{base_url}/api/result/{task_id}")
-                        rr.raise_for_status()
-                        try:
-                            rd = rr.json()
-                            rsegs = _parse_asr_response(rd)
-                            for s in rsegs:
-                                emb = s.get("embedding")
-                                if emb and isinstance(emb, list) and len(emb) > 0:
-                                    return emb
-                        except Exception:
-                            pass
-                        break
-
-        return None
+        return data.get("embedding")
 
     except Exception as e:
         logger.warning(f"提取片段声纹失败: {e}")
