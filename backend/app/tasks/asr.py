@@ -102,6 +102,25 @@ def _mock_transcript_segments() -> list[dict]:
 # ============== Plan A: pyannote diarization preprocessing ==============
 
 
+def _get_audio_duration(audio_path: Path) -> float | None:
+    """用 ffprobe 获取音频时长（秒），失败返回 None。"""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(audio_path),
+            ],
+            capture_output=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+        return None
+    except Exception:
+        return None
+
+
 def _call_diarization_api(audio_path: Path) -> dict | None:
     """
     调用 pyannote 说话人分离服务 (8004)，获取精准的说话人边界。
@@ -636,26 +655,41 @@ def run_transcribe_meeting(meeting_id: int) -> dict:
             return {"error": meeting.asr_error}
 
         try:
-            # ─── Step 1: 尝试 pyannote 说话人分离 ───
-            diar_result = _call_diarization_api(audio_path)
+            # ─── Step 1: 获取音频时长，决定走哪条 pipeline ───
+            audio_duration = _get_audio_duration(audio_path)
 
-            if diar_result and diar_result.get("segments"):
-                # ✅ Plan A: pyannote 精准边界 → 切片 → 并行 ASR
-                pipeline_mode = "pyannote+asr"
+            # 短音频（< 5 分钟）直接用 8002 联合模式，避免 pyannote 过度切分导致大量碎片请求
+            SHORT_AUDIO_THRESHOLD = 300.0  # 5 分钟
+
+            if audio_duration and audio_duration < SHORT_AUDIO_THRESHOLD:
+                # ✅ 快速路径：8002 联合模式（ASR + 说话人标注一起做）
+                pipeline_mode = "asr-fast"
                 logger.info(
-                    f"会议 {meeting_id}: 使用 Plan A (pyannote 说话人分离), "
-                    f"{diar_result['num_speakers']} 个说话人, "
-                    f"{len(diar_result['segments'])} 个段落"
+                    f"会议 {meeting_id}: 短音频 ({audio_duration:.0f}s), 直接使用 8002 联合模式"
                 )
-                all_segments = _transcribe_segments_parallel(
-                    audio_path, diar_result["segments"]
-                )
-            else:
-                # ⚠️ 回退：8002 联合模式（ASR + 说话人标注一起做）
-                pipeline_mode = "asr-fallback"
-                logger.info(f"会议 {meeting_id}: pyannote 不可用, 回退到 8002 联合模式")
                 data = _call_asr_api(audio_path)
                 all_segments = _parse_asr_response(data)
+            else:
+                # ⚠️ 长音频：尝试 pyannote 说话人分离
+                diar_result = _call_diarization_api(audio_path)
+
+                if diar_result and diar_result.get("segments"):
+                    # ✅ Plan A: pyannote 精准边界 → 切片 → 并行 ASR
+                    pipeline_mode = "pyannote+asr"
+                    logger.info(
+                        f"会议 {meeting_id}: 使用 Plan A (pyannote 说话人分离), "
+                        f"{diar_result['num_speakers']} 个说话人, "
+                        f"{len(diar_result['segments'])} 个段落"
+                    )
+                    all_segments = _transcribe_segments_parallel(
+                        audio_path, diar_result["segments"]
+                    )
+                else:
+                    # ⚠️ 回退：8002 联合模式（ASR + 说话人标注一起做）
+                    pipeline_mode = "asr-fallback"
+                    logger.info(f"会议 {meeting_id}: pyannote 不可用, 回退到 8002 联合模式")
+                    data = _call_asr_api(audio_path)
+                    all_segments = _parse_asr_response(data)
 
         except Exception as exc:
             meeting.status = MeetingStatus.failed
