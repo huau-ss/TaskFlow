@@ -5,7 +5,13 @@ import 'package:dio/dio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiService {
-  ApiService({required String baseUrl}) : _dio = Dio(BaseOptions(baseUrl: baseUrl));
+  ApiService({required String baseUrl})
+      : _dio = Dio(BaseOptions(
+          baseUrl: baseUrl,
+          connectTimeout: const Duration(seconds: 30),
+          receiveTimeout: const Duration(seconds: 60),
+          sendTimeout: const Duration(seconds: 120),
+        ));
 
   String get baseUrl => _dio.options.baseUrl;
   final Dio _dio;

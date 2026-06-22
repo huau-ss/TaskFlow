@@ -42,6 +42,10 @@ class UploadQueue {
       onOpen: (db) async {
         // one-time migration for older camelCase statuses
         await db.execute("UPDATE upload_queue SET status='pending_upload' WHERE status='pendingUpload'");
+        // 重置卡在 uploading 超过 2 分钟的条目（app 被杀/网络断开导致）
+        await db.execute(
+          "UPDATE upload_queue SET status='pending_upload', retry_count=0, error_message='reset: stuck uploading' WHERE status='uploading'",
+        );
       },
     );
   }
@@ -74,6 +78,20 @@ class UploadQueue {
   }
 
   Future<List<Map<String, dynamic>>> getPending() async {
+    // 先重置卡在 uploading 超过 2 分钟的条目
+    final staleThreshold =
+        DateTime.now().subtract(const Duration(minutes: 2)).toIso8601String();
+    await _db!.update(
+      'upload_queue',
+      {
+        'status': UploadStatus.pending_upload.name,
+        'retry_count': 0,
+        'error_message': 'reset: stuck uploading',
+      },
+      where: 'status = ? AND updated_at < ?',
+      whereArgs: [UploadStatus.uploading.name, staleThreshold],
+    );
+
     return _db!.query(
       'upload_queue',
       where: 'status IN (?, ?)',
@@ -110,6 +128,9 @@ class UploadQueue {
       final result = await api.uploadMeeting(
         file: file,
         title: item['title'] as String?,
+      ).timeout(
+        const Duration(minutes: 5),
+        onTimeout: () => throw Exception('上传超时，请检查网络连接'),
       );
       await _db!.update(
         'upload_queue',
