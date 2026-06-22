@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import numpy as np
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -72,23 +73,26 @@ async def register_voice_print(
             )
 
         service = VoicePrintService(db)
-        # 调用 ASR 服务提取声纹特征
-        embedding = await service.extract_voice_embedding(wav_path)
-        
-        if not embedding:
+        # 调用 ASR 服务提取声纹特征（同时获取实际音频时长）
+        result = await service.extract_voice_embedding(wav_path)
+
+        if not result or not result.get("embedding"):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="无法从音频中提取声纹特征，请确保音频清晰且包含人声"
             )
-        
+
+        embedding = result["embedding"]
+        audio_duration = result.get("duration")
+
         # 注册声纹（初始为未验证状态）
         voice_print = service.register_voice_print(
             employee_id=employee_id,
             embedding=embedding,
             source_audio_path=str(wav_path),
-            audio_duration=len(content) / 16000 / 2,  # 估算时长
+            audio_duration=audio_duration,
             note=note,
-            is_verified=False
+            is_verified=False,
         )
         
         await db.commit()
@@ -150,21 +154,24 @@ async def register_voice_print_base64(
             )
 
         service = VoicePrintService(db)
-        embedding = await service.extract_voice_embedding(wav_path)
-        
-        if not embedding:
+        result = await service.extract_voice_embedding(wav_path)
+
+        if not result or not result.get("embedding"):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="无法从音频中提取声纹特征"
             )
-        
+
+        embedding = result["embedding"]
+        audio_duration = result.get("duration")
+
         voice_print = service.register_voice_print(
             employee_id=req.employee_id,
             embedding=embedding,
             source_audio_path=str(wav_path),
-            audio_duration=len(audio_data) / 16000 / 2,
+            audio_duration=audio_duration,
             note=req.note,
-            is_verified=False
+            is_verified=False,
         )
         
         await db.commit()
@@ -245,82 +252,133 @@ async def recognize_meeting_speakers(
     _: Employee = Depends(get_current_user),
 ):
     """
-    对会议录音进行说话人识别
-    
-    返回识别后的转写文本，每个片段包含说话人信息
+    对会议录音进行说话人识别（重识别）。
+
+    从原始音频提取声纹 embedding，按 speaker_label 聚合后与已注册声纹匹配，
+    将结果回填到 TranscriptSegment。
     """
+    from collections import defaultdict
+
+    import httpx
+    from app.config import settings
     from app.models import Meeting, MeetingStatus, TranscriptSegment
-    
-    # 获取会议和转写片段
-    result = await db.execute(
-        select(Meeting)
-        .options(selectinload(Meeting.segments).selectinload(TranscriptSegment.employee))
-        .where(Meeting.id == meeting_id)
-    )
-    meeting = result.scalar_one_or_none()
-    
+
+    meeting = await db.get(Meeting, meeting_id, options=[selectinload(Meeting.segments)])
     if not meeting:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="会议不存在")
-    
+
     if meeting.status != MeetingStatus.transcribed:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"会议尚未完成转写 (status={meeting.status.value})"
         )
-    
+
     if not meeting.segments:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="会议没有转写片段"
-        )
-    
-    # 调用声纹服务进行识别
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="会议没有转写片段")
+
     audio_path = Path(meeting.nas_path)
+    if not audio_path.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="音频文件不存在")
+
     service = VoicePrintService(db)
-    
-    # 获取所有验证过的声纹
     all_embeddings = service.get_all_verified_embeddings()
-    
     if not all_embeddings:
-        # 没有已注册的声纹，返回原始数据
-        return TranscriptWithSpeakers(
-            meeting_id=meeting_id,
-            status=meeting.status,
-            segments=[
-                TranscriptSegmentWithSpeaker(
-                    id=seg.id,
-                    speaker_label=seg.speaker_label,
-                    employee_id=None,
-                    employee_name=None,
-                    text=seg.text,
-                    start_time=seg.start_time,
-                    end_time=seg.end_time,
-                    sequence=seg.sequence,
-                    confidence=None
+        return _build_response(meeting, [])
+
+    # 调用 FunASR 提取会议音频的 embedding
+    funasr_url = getattr(settings, "funasr_url", "http://localhost:8005")
+    try:
+        with httpx.Client(timeout=600.0) as client:
+            with open(audio_path, "rb") as f:
+                resp = client.post(
+                    f"{funasr_url}/api/transcribe",
+                    files={"file": (audio_path.name, f, "audio/wav")},
                 )
-                for seg in sorted(meeting.segments, key=lambda s: s.sequence)
-            ]
+            resp.raise_for_status()
+            funasr_result = resp.json()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"FunASR 服务不可用: {e}"
         )
-    
-    # TODO: 实际上需要 ASR 服务返回每个 speaker 的 embedding
-    # 这里需要根据实际的 ASR 服务能力来实现
-    # 临时方案：假设 ASR 返回的 speaker_label 保持一致，直接使用
-    
-    return TranscriptWithSpeakers(
-        meeting_id=meeting_id,
-        status=meeting.status,
-        segments=[
+
+    segments_raw = funasr_result.get("segments", [])
+    if not segments_raw:
+        return _build_response(meeting, [])
+
+    # 按 speaker_label 聚合 embedding
+    speaker_embeddings: dict[str, list[list[float]]] = defaultdict(list)
+    for seg in segments_raw:
+        label = seg.get("speaker_label", "?")
+        emb = seg.get("embedding")
+        if emb and isinstance(emb, list) and len(emb) > 0:
+            speaker_embeddings[label].append(emb)
+
+    # 聚合后逐人匹配
+    speaker_match: dict[str, tuple[int | None, float]] = {}
+    for spk, embs in speaker_embeddings.items():
+        avg_emb = list(np.mean(embs, axis=0))
+        emp_id, conf = service.recognize_speaker(avg_emb)
+        speaker_match[spk] = (emp_id, conf)
+
+    # 回填到数据库
+    from app.models import Employee
+    label_to_name: dict[str, str] = {}
+    for spk, (emp_id, _) in speaker_match.items():
+        if emp_id is not None:
+            emp = await db.get(Employee, emp_id)
+            if emp:
+                label_to_name[spk] = emp.name
+
+    updated = 0
+    for seg in meeting.segments:
+        emp_id, conf = speaker_match.get(seg.speaker_label, (None, 0.0))
+        seg.employee_id = emp_id
+        updated += 1
+
+    await db.commit()
+    logger.info(f"[recognize-meeting] 更新 {updated} 个片段的 employee_id")
+
+    return _build_response(meeting, speaker_match, label_to_name)
+
+
+def _build_response(
+    meeting,
+    speaker_match: dict[str, tuple[int | None, float]] | None = None,
+    label_to_name: dict[str, str] | None = None,
+) -> TranscriptWithSpeakers:
+    """构造响应，将 speaker_match 映射应用到 meeting.segments"""
+    segs = []
+    for seg in sorted(meeting.segments, key=lambda s: s.sequence):
+        emp_id = None
+        conf = None
+        if speaker_match is not None:
+            emp_id, conf = speaker_match.get(seg.speaker_label, (None, 0.0))
+        else:
+            emp_id = seg.employee_id
+            conf = 1.0 if emp_id else None
+
+        emp_name = None
+        if label_to_name:
+            emp_name = label_to_name.get(seg.speaker_label)
+        elif emp_id and seg.employee:
+            emp_name = seg.employee.name
+
+        segs.append(
             TranscriptSegmentWithSpeaker(
                 id=seg.id,
                 speaker_label=seg.speaker_label,
-                employee_id=seg.employee_id,
-                employee_name=seg.employee.name if seg.employee else None,
+                employee_id=emp_id,
+                employee_name=emp_name,
                 text=seg.text,
                 start_time=seg.start_time,
                 end_time=seg.end_time,
                 sequence=seg.sequence,
-                confidence=1.0 if seg.employee_id else None
+                confidence=conf,
             )
-            for seg in sorted(meeting.segments, key=lambda s: s.sequence)
-        ]
+        )
+    return TranscriptWithSpeakers(
+        meeting_id=meeting.id,
+        status=meeting.status,
+        segments=segs,
     )

@@ -23,6 +23,17 @@ from sklearn.cluster import AgglomerativeClustering
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+# ── 聚类质量控制参数 ──────────────────────────────────────
+# 合并相邻 VAD 段的最大间隔（秒）。增大可减少碎片。
+_MERGE_MAX_GAP = 3.0          # 原值 2.0s → 减少小间隙导致的碎片片段
+# 片段合并后最小持续时长（秒），短于此值直接丢弃，不参与 embedding 提取。
+# CAM++ 需要 1.5s+ 语音才能输出稳定向量，0.5s 太短会引入噪声。
+_MERGE_MIN_DURATION = 1.5     # 原值 0.5s
+# 丢弃短片段后，剩余用于聚类的 embedding 数量下限。
+_MIN_EMBEDDINGS_FOR_CLUSTERING = 2
+# CAM++ embedding 间的余弦距离上限（用于过滤异常值）。超过此距离认为是噪声。
+_OUTLIER_DISTANCE_THRESHOLD = 0.65  # 保留，仅用于日志记录（已停用）
+
 app = FastAPI(title="FunASR Service", version="2.0")
 
 # ── 模型路径 ──
@@ -88,25 +99,27 @@ def _audio_to_wav(src: str | Path, dst: Path) -> bool:
     return r.returncode == 0
 
 
-def _merge_vad_segments(segments: list[dict], max_gap: float = 2.0, min_dur: float = 0.5) -> list[dict]:
-    """合并相邻 VAD 段（间隔 < max_gap 秒且 duration >= min_dur）。"""
+def _merge_vad_segments(segments: list[dict]) -> list[dict]:
+    """合并相邻 VAD 段（间隔 < _MERGE_MAX_GAP 秒且合并后 duration >= _MERGE_MIN_DURATION）。
+
+    注意：过短的片段会导致 CAM++ embedding 不稳定，合并后低于 _MERGE_MIN_DURATION 的
+    片段会被丢弃，以提升后续说话人聚类的质量。
+    """
     if not segments:
         return []
     merged = [dict(segments[0])]
     for seg in segments[1:]:
         gap = seg["start"] - merged[-1]["end"]
-        if gap <= max_gap:
+        if gap <= _MERGE_MAX_GAP:
             merged[-1]["end"] = seg["end"]
         else:
-            # 跳过过短的非语音段
             dur = merged[-1]["end"] - merged[-1]["start"]
-            if dur < min_dur:
-                merged[-1] = seg  # 替换
+            if dur < _MERGE_MIN_DURATION:
+                merged[-1] = dict(seg)
             else:
                 merged.append(dict(seg))
-    # 检查最后一个
     dur = merged[-1]["end"] - merged[-1]["start"]
-    if dur < min_dur and len(merged) > 1:
+    if dur < _MERGE_MIN_DURATION and len(merged) > 1:
         merged.pop()
     return merged
 
@@ -160,15 +173,22 @@ async def transcribe(file: UploadFile = File(...)):
             dur = len(wav) / sr if sr > 0 else 0
             vad_segments = [{"start": 0.0, "end": dur}]
 
-        # 合并相邻段
+        # 合并相邻段（使用全局质量控制参数）
         merged = _merge_vad_segments(vad_segments)
         logger.info(f"VAD: {len(vad_segments)} 段 → 合并为 {len(merged)} 段")
 
-        # ── Step 2: 每段 ASR + CAM++ ──
+        # ── Step 2: 每段 ASR + CAM++ ──────────────────────────────
         segments = []
         embeddings = []
+        min_seg_dur = 1.0  # 秒：跳过太短的片段（CAM++ 需要足够语音帧）
 
         for i, seg in enumerate(merged):
+            # 跳过过短片段（CAM++ 在 < 1s 语音上不稳定）
+            seg_dur = seg["end"] - seg["start"]
+            if seg_dur < min_seg_dur:
+                logger.debug(f"跳过过短片段 {i}: {seg_dur:.2f}s < {min_seg_dur}s")
+                continue
+
             # 截取音频
             wav, sr = sf.read(wav_path, dtype="float32")
             if len(wav.shape) > 1:
@@ -197,37 +217,38 @@ async def transcribe(file: UploadFile = File(...)):
                     if emb_data is not None:
                         if hasattr(emb_data, "tolist"):
                             emb = emb_data.tolist()
-                            # 可能是 [[...]] 二维
                             if isinstance(emb, list) and len(emb) == 1 and isinstance(emb[0], list):
                                 emb = emb[0]
                         elif isinstance(emb_data, list):
                             emb = emb_data
 
-                if text:
+                # segments 和 embeddings 必须严格同步（索引一一对应），否则后续聚类索引会错位
+                if text and emb:
                     segments.append({
-                        "speaker_label": "",  # 聚类后填充
+                        "speaker_label": "",
                         "text": text,
                         "start_time": seg["start"],
                         "end_time": seg["end"],
                         "embedding": emb,
                         "sequence": i,
                     })
-                    if emb:
-                        embeddings.append(emb)
+                    embeddings.append(emb)
             finally:
                 Path(slice_path.name).unlink(missing_ok=True)
 
-        logger.info(f"ASR+Embedding: {len(segments)} 个有效段")
+        logger.info(f"ASR+Embedding: {len(segments)} 个有效段（已过滤 < {min_seg_dur}s 片段）")
 
-        # ── Step 3: 说话人聚类 ──
+        # ── Step 3: 说话人聚类 ──────────────────────────────────
         num_speakers = 1
-        if len(embeddings) >= 2 and len(embeddings) == len(segments):
+        if len(embeddings) >= _MIN_EMBEDDINGS_FOR_CLUSTERING:
             emb_matrix = np.array(embeddings)
-            n_segments = len(segments)
 
-            # 启发式：短会议（< 3 分钟）大概率 2 人，强制 2 聚类
-            if n_segments >= 3:
-                num_speakers = min(2, n_segments)
+            # 启发式确定说话人数量（基于有效 embedding 数量）
+            n = len(embeddings)
+            if n >= 7:
+                num_speakers = min(3, n)
+            elif n >= 3:
+                num_speakers = min(2, n)
             else:
                 num_speakers = 1
 
@@ -235,9 +256,19 @@ async def transcribe(file: UploadFile = File(...)):
                 n_clusters=num_speakers, metric="cosine", linkage="average"
             )
             labels = clustering.fit_predict(emb_matrix)
-            for i, seg in enumerate(segments):
-                seg["speaker_label"] = f"SPEAKER_{labels[i]:02d}"
+
+            # 回填标签（segments 和 embeddings 严格同步，直接按顺序对应）
+            for k, seg in enumerate(segments):
+                seg["speaker_label"] = f"SPEAKER_{labels[k]:02d}"
+
+            logger.info(
+                f"说话人聚类: {n} 片段 → {num_speakers} 人 "
+                f"(阈值: gap={_MERGE_MAX_GAP}s, min_dur={_MERGE_MIN_DURATION}s)"
+            )
         else:
+            logger.warning(
+                f"有效片段 < {_MIN_EMBEDDINGS_FOR_CLUSTERING}，跳过聚类，全部标记为 SPEAKER_00"
+            )
             for seg in segments:
                 seg["speaker_label"] = "SPEAKER_00"
 

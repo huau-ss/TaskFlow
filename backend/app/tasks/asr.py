@@ -536,22 +536,36 @@ def _recognize_speaker(
         f"员工#{eid}={score:.4f}" for eid, score in all_scores
     )
     gap = best_similarity - second_similarity
-    ABS_THRESHOLD = 0.3   # 绝对阈值（宽松）
-    REL_GAP = 0.10        # 相对差距（第一名必须比第二名高这么多）
+    n_candidates = len(employee_embeddings)
 
-    # 决策：绝对分数高  OR  相对差距显著
-    if best_similarity >= ABS_THRESHOLD or gap >= REL_GAP:
+    # 决策逻辑：
+    # - 1 个候选员工：需要满足较高阈值（0.65），避免随机 embedding 误命中唯一员工
+    # - 多个候选员工：双重条件——绝对分数 >= 0.3  或  gap >= 0.10（第一名拉开差距）
+    if n_candidates == 1:
+        # 单员工：gap 无意义（始终为 0），必须用更高阈值防止误匹配
+        SINGLE_EMPLOYEE_THRESHOLD = 0.65
+        matched = best_similarity >= SINGLE_EMPLOYEE_THRESHOLD
+        matched_reason = f"abs={best_similarity:.4f}>={SINGLE_EMPLOYEE_THRESHOLD}"
+    else:
+        ABS_THRESHOLD = 0.3
+        REL_GAP = 0.10
+        matched = best_similarity >= ABS_THRESHOLD or gap >= REL_GAP
+        matched_reason = (
+            f"abs={best_similarity:.4f}>={ABS_THRESHOLD} or gap={gap:.4f}>={REL_GAP}"
+        )
+
+    if matched:
         logger.info(
             f"[声纹识别] {context}: 命中 员工#{best_employee_id} "
             f"相似度={best_similarity:.4f} gap={gap:.4f} "
-            f"(阈值 abs={ABS_THRESHOLD} rel={REL_GAP}) | 所有分数: {scores_str}"
+            f"({matched_reason}) | 所有分数: {scores_str}"
         )
         return best_employee_id, best_similarity
 
     logger.info(
         f"[声纹识别] {context}: 拒绝 — "
         f"最佳 员工#{best_employee_id}={best_similarity:.4f} gap={gap:.4f} "
-        f"不满足 abs>{ABS_THRESHOLD} 或 rel_gap>{REL_GAP} | 所有分数: {scores_str}"
+        f"({matched_reason}) | 所有分数: {scores_str}"
     )
     return None, best_similarity
 
@@ -626,7 +640,7 @@ def _extract_segment_embedding(audio_path: Path, start_time: float | None, end_t
 
 
 def _recognize_meeting_speakers(
-    db, meeting_id: int, segments: list[dict]
+    db, segments: list[dict]
 ) -> list[dict]:
     """
     对会议的每个片段进行说话人识别。
@@ -727,7 +741,7 @@ def run_transcribe_meeting(meeting_id: int) -> dict:
 
         # Step 2: 声纹识别
         recognized_segments = _recognize_meeting_speakers(
-            db, meeting_id, all_segments
+            db, all_segments
         )
 
         # Step 3: 持久化

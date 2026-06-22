@@ -43,10 +43,11 @@ class VoicePrintService:
     def __init__(self, db: Session):
         self.db = db
     
-    async def extract_voice_embedding(self, audio_path: Path) -> list[float] | None:
+    async def extract_voice_embedding(self, audio_path: Path) -> dict | None:
         """
         调用 FunASR 的 CAM++ 模型提取声纹 embedding。
 
+        返回 {"embedding": [...], "duration": float} 或 None（提取失败）。
         与转写 pipeline 使用相同的 CAM++ 模型，确保注册和识别的向量空间一致。
         """
         import aiofiles
@@ -66,7 +67,7 @@ class VoicePrintService:
                 embedding = data.get("embedding")
                 if embedding and isinstance(embedding, list):
                     logger.info(f"FunASR CAM++ 提取 {len(embedding)}-dim embedding")
-                    return embedding
+                    return data  # 返回完整响应，包含 duration
                 logger.warning(f"FunASR 响应格式不正确: {list(data.keys())}")
                 return None
         except Exception as e:
@@ -80,7 +81,8 @@ class VoicePrintService:
         source_audio_path: str | None = None,
         audio_duration: float | None = None,
         note: str | None = None,
-        is_verified: bool = False
+        is_verified: bool = False,
+        model_version: str = "ecapa-tdnn",
     ) -> VoicePrint:
         """
         注册员工声纹
@@ -92,6 +94,7 @@ class VoicePrintService:
             audio_duration: 音频时长
             note: 备注
             is_verified: 是否已验证
+            model_version: embedding 模型版本，用于区分向量空间（mfcc-v1 / ecapa-tdnn）
         """
         voice_print = VoicePrint(
             employee_id=employee_id,
@@ -99,7 +102,8 @@ class VoicePrintService:
             source_audio_path=source_audio_path,
             audio_duration=audio_duration,
             note=note,
-            is_verified=is_verified
+            is_verified=is_verified,
+            model_version=model_version,
         )
         self.db.add(voice_print)
         return voice_print
@@ -113,19 +117,25 @@ class VoicePrintService:
         )
         return list(result.scalars().all())
     
+    # 当前 pipeline 使用的模型版本，只有同版本 embedding 才可以比较
+    ACTIVE_MODEL_VERSION = "ecapa-tdnn"
+
     def get_all_verified_embeddings(self) -> dict[int, list[list[float]]]:
         """
-        获取所有已验证员工的声纹特征向量
-        
-        Returns:
-            { employee_id: [embedding1, embedding2, ...] }
+        获取所有已验证员工的声纹特征向量（仅当前活动模型版本）。
+
+        不同 model_version 的 embedding 来自不同模型（mfcc-v1: 256-d, ecapa-tdnn: 192-d），
+        不在同一向量空间，跨版本比较无意义。
         """
         result = self.db.execute(
             select(VoicePrint)
-            .where(VoicePrint.is_verified == True)
+            .where(
+                VoicePrint.is_verified == True,
+                VoicePrint.model_version == self.ACTIVE_MODEL_VERSION,
+            )
         )
         voice_prints = result.scalars().all()
-        
+
         embeddings_map: dict[int, list[list[float]]] = {}
         for vp in voice_prints:
             if vp.employee_id not in embeddings_map:
@@ -136,7 +146,7 @@ class VoicePrintService:
                     embeddings_map[vp.employee_id].append(embedding)
             except json.JSONDecodeError:
                 logger.warning(f"无法解析声纹 embedding: {vp.id}")
-        
+
         return embeddings_map
     
     def recognize_speaker(
@@ -241,14 +251,21 @@ class SyncVoicePrintService:
             )
             return list(result.scalars().all())
     
+    # 当前 pipeline 使用的模型版本
+    ACTIVE_MODEL_VERSION = "ecapa-tdnn"
+
     def get_all_verified_embeddings(self) -> dict[int, list[list[float]]]:
+        """同步版：获取所有已验证员工的声纹特征向量（仅当前活动模型版本）。"""
         with self.Session() as db:
             result = db.execute(
                 select(VoicePrint)
-                .where(VoicePrint.is_verified == True)
+                .where(
+                    VoicePrint.is_verified == True,
+                    VoicePrint.model_version == self.ACTIVE_MODEL_VERSION,
+                )
             )
             voice_prints = result.scalars().all()
-            
+
             embeddings_map: dict[int, list[list[float]]] = {}
             for vp in voice_prints:
                 if vp.employee_id not in embeddings_map:
@@ -259,5 +276,5 @@ class SyncVoicePrintService:
                         embeddings_map[vp.employee_id].append(embedding)
                 except json.JSONDecodeError:
                     pass
-            
+
             return embeddings_map

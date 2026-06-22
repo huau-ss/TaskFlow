@@ -177,6 +177,9 @@ class VoicePrint(Base):
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     # 备注
     note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # 声纹模型版本，用于区分不同 embedding 向量空间（mfcc-v1: 256-d MFCC, ecapa-tdnn: 192-d CAM++）
+    # 注意：mfcc-v1 和 ecapa-tdnn 不在同一向量空间，识别时必须按此字段过滤
+    model_version: Mapped[str] = mapped_column(String(32), nullable=False, server_default="ecapa-tdnn")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     employee: Mapped["Employee"] = relationship("Employee", back_populates="voice_prints")

@@ -285,12 +285,11 @@ async def match_employees_node(state: AgentState) -> AgentState:
                         match_method = "name_exact"
                         match_confidence = 1.0
                     else:
-                        # 子串匹配
+                        # 子串匹配：只有当提取的姓名是员工姓名的子串时才匹配
+                        # 注意：不使用反向匹配（emp_name in extracted_name），
+                        # 因为单字姓名（如"李"）会匹配任何包含该字的员工，造成大量误匹配
                         for emp_name, emp_id in employee_names.items():
-                            if (
-                                extracted_name in emp_name
-                                or emp_name in extracted_name
-                            ):
+                            if extracted_name in emp_name:
                                 executor_id = emp_id
                                 match_method = "name_fuzzy"
                                 match_confidence = 0.6
