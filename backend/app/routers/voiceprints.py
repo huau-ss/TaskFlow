@@ -49,16 +49,31 @@ async def register_voice_print(
     
     # 读取音频文件
     content = await file.read()
-    
-    # 保存临时文件用于提取声纹
+
+    # 保存临时文件（保留原始后缀），再用 ffmpeg 转为 16kHz mono WAV
+    import subprocess
     import uuid
-    temp_path = Path(f"/tmp/voiceprint_{uuid.uuid4()}.wav")
-    temp_path.write_bytes(content)
-    
+    orig_suffix = Path(file.filename or "audio.wav").suffix or ".wav"
+    raw_path = Path(f"/tmp/voiceprint_raw_{uuid.uuid4()}{orig_suffix}")
+    wav_path = Path(f"/tmp/voiceprint_{uuid.uuid4()}.wav")
+    raw_path.write_bytes(content)
+
     try:
+        # ffmpeg 转 16kHz mono WAV
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(raw_path),
+             "-ar", "16000", "-ac", "1", "-f", "wav", str(wav_path)],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"音频格式转换失败: {result.stderr.decode()[:200]}"
+            )
+
         service = VoicePrintService(db)
         # 调用 ASR 服务提取声纹特征
-        embedding = await service.extract_voice_embedding(temp_path)
+        embedding = await service.extract_voice_embedding(wav_path)
         
         if not embedding:
             raise HTTPException(
@@ -83,8 +98,10 @@ async def register_voice_print(
         
     finally:
         # 清理临时文件
-        if temp_path.exists():
-            temp_path.unlink()
+        if raw_path.exists():
+            raw_path.unlink()
+        if wav_path.exists():
+            wav_path.unlink()
 
 
 @router.post("/register-audio-base64", response_model=VoicePrintResponse, status_code=status.HTTP_201_CREATED)
@@ -112,15 +129,28 @@ async def register_voice_print_base64(
         audio_data = base64.b64decode(req.audio_base64)
     except Exception:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无效的 Base64 音频数据")
-    
-    # 保存临时文件
+
+    # 保存原始数据再用 ffmpeg 转为 16kHz mono WAV
+    import subprocess
     import uuid
-    temp_path = Path(f"/tmp/voiceprint_{uuid.uuid4()}.wav")
-    temp_path.write_bytes(audio_data)
-    
+    raw_path = Path(f"/tmp/voiceprint_raw_{uuid.uuid4()}.raw")
+    wav_path = Path(f"/tmp/voiceprint_{uuid.uuid4()}.wav")
+    raw_path.write_bytes(audio_data)
+
     try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(raw_path),
+             "-ar", "16000", "-ac", "1", "-f", "wav", str(wav_path)],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"音频格式转换失败: {result.stderr.decode()[:200]}"
+            )
+
         service = VoicePrintService(db)
-        embedding = await service.extract_voice_embedding(temp_path)
+        embedding = await service.extract_voice_embedding(wav_path)
         
         if not embedding:
             raise HTTPException(
@@ -143,8 +173,10 @@ async def register_voice_print_base64(
         return voice_print
         
     finally:
-        if temp_path.exists():
-            temp_path.unlink()
+        if raw_path.exists():
+            raw_path.unlink()
+        if wav_path.exists():
+            wav_path.unlink()
 
 
 @router.post("/{voiceprint_id}/verify", response_model=VoicePrintResponse)
