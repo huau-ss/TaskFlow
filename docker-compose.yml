@@ -61,6 +61,7 @@ services:
       DATABASE_URL_SYNC: postgresql://taskflow:taskflow@postgres:5432/taskflow
       REDIS_URL: redis://redis:6379/0
       NAS_PATH: /mnt/nas/meetings
+      FUNASR_URL: http://funasr:8005
     volumes:
       - ./backend:/app
       - nas_data:/mnt/nas/meetings
@@ -71,6 +72,35 @@ services:
         condition: service_healthy
     command: celery -A app.tasks.celery_app worker --loglevel=info
 
+  # FunASR 统一语音服务 (ASR + 说话人分离 + CAM++ embedding)
+  # 注意：Docker Hub 不可达时，手动在宿主机启动：
+  #   cd funasr_service && ./venv/bin/python3.11 -m uvicorn main:app --host 0.0.0.0 --port 8005
+  funasr:
+    build:
+      context: ./funasr_service
+      dockerfile: Dockerfile
+    ports:
+      - "8005:8005"
+    environment:
+      OMP_NUM_THREADS: 4
+      MKL_NUM_THREADS: 4
+    volumes:
+      - funasr_models:/app/models
+      - funasr_cache:/root/.cache/modelscope
+    deploy:
+      resources:
+        limits:
+          cpus: "8"
+          memory: 10G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
 volumes:
   postgres_data:
   nas_data:
+  funasr_models:
+  funasr_cache:

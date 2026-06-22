@@ -102,6 +102,22 @@ def _mock_transcript_segments() -> list[dict]:
 # ============== Plan A: pyannote diarization preprocessing ==============
 
 
+def _call_funasr_transcribe(audio_path: Path) -> dict:
+    """调用 FunASR 统一转写服务：VAD + ASR + CAM++ embedding + 说话人聚类。
+
+    一次 HTTP 调用替换旧的 8004(pyannote) + 8002(ASR) + 8003(MFCC) 三步骤。
+    """
+    funasr_url = getattr(settings, "funasr_url", "http://localhost:8005")
+    with httpx.Client(timeout=600.0) as client:
+        with open(audio_path, "rb") as f:
+            resp = client.post(
+                f"{funasr_url}/api/transcribe",
+                files={"file": (audio_path.name, f, "audio/wav")},
+            )
+        resp.raise_for_status()
+        return resp.json()
+
+
 def _get_audio_duration(audio_path: Path) -> float | None:
     """用 ffprobe 获取音频时长（秒），失败返回 None。"""
     try:
@@ -460,9 +476,13 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return float(dot_product / (norm_a * norm_b))
 
 
-def _recognize_speaker(db, embedding: list[float]) -> tuple[int | None, float]:
+def _recognize_speaker(
+    db, embedding: list[float], context: str = ""
+) -> tuple[int | None, float]:
     """
     识别说话人，返回 (employee_id, confidence)
+
+    context: 调试用的段标识，如 "seg#3 SPEAKER_01 5.2s-8.1s"
     """
     from sqlalchemy import select
     from app.models import VoicePrint
@@ -472,14 +492,15 @@ def _recognize_speaker(db, embedding: list[float]) -> tuple[int | None, float]:
         select(VoicePrint).where(VoicePrint.is_verified == True)
     )
     voice_prints = result.scalars().all()
-    
+
     if not voice_prints:
+        logger.warning(f"[声纹识别] {context}: 没有已注册的声纹")
         return None, 0.0
-    
+
     # 按员工分组，计算平均 embedding
     from collections import defaultdict
     employee_embeddings: dict[int, list[list[float]]] = defaultdict(list)
-    
+
     for vp in voice_prints:
         try:
             emb = json.loads(vp.embedding)
@@ -487,28 +508,42 @@ def _recognize_speaker(db, embedding: list[float]) -> tuple[int | None, float]:
                 employee_embeddings[vp.employee_id].append(emb)
         except (json.JSONDecodeError, TypeError):
             continue
-    
+
     if not employee_embeddings:
+        logger.warning(f"[声纹识别] {context}: 无法解析任何声纹 embedding")
         return None, 0.0
-    
+
+    # 逐个员工计算相似度并记录
     best_employee_id = None
     best_similarity = 0.0
-    
+    all_scores: list[tuple[int, float]] = []
+
     for emp_id, embeddings in employee_embeddings.items():
-        # 计算该员工的平均声纹
         avg_emb = np.mean(embeddings, axis=0).tolist()
         similarity = cosine_similarity(embedding, avg_emb)
-        
+        all_scores.append((emp_id, round(similarity, 4)))
+
         if similarity > best_similarity:
             best_similarity = similarity
             best_employee_id = emp_id
-    
-    # 置信度阈值
+
+    # 日志：输出所有员工的相似度
+    scores_str = ", ".join(
+        f"员工#{eid}={score:.4f}" for eid, score in all_scores
+    )
     MIN_THRESHOLD = 0.5
-    
+
     if best_similarity < MIN_THRESHOLD:
+        logger.info(
+            f"[声纹识别] {context}: 最佳匹配 员工#{best_employee_id}={best_similarity:.4f} "
+            f"低于阈值 {MIN_THRESHOLD}，拒绝识别 | 所有分数: {scores_str}"
+        )
         return None, best_similarity
-    
+
+    logger.info(
+        f"[声纹识别] {context}: 命中 员工#{best_employee_id} "
+        f"相似度={best_similarity:.4f} (阈值={MIN_THRESHOLD}) | 所有分数: {scores_str}"
+    )
     return best_employee_id, best_similarity
 
 
@@ -581,37 +616,29 @@ def _extract_segment_embedding(audio_path: Path, start_time: float | None, end_t
             Path(tmp_path).unlink(missing_ok=True)
 
 
-def _recognize_meeting_speakers(db, meeting_id: int, segments: list[dict], audio_path: Path | None = None) -> list[dict]:
+def _recognize_meeting_speakers(
+    db, meeting_id: int, segments: list[dict]
+) -> list[dict]:
     """
     对会议的每个片段进行说话人识别。
 
-    统一使用 8003 MFCC 256-dim embedding —— 与注册声纹同空间，确保余弦相似度有效。
-    8002 的 CAM++ embedding 维度不固定（512/1024），与注册的 MFCC 256 不兼容，不使用。
-
-    Args:
-        db: 数据库会话
-        meeting_id: 会议 ID
-        segments: ASR 返回的片段列表
-        audio_path: 原始音频文件路径（用于截取片段提取声纹）
-
-    Returns:
-        带有识别结果的片段列表
+    FunASR 已返回 CAM++ embedding（与注册声纹同空间），直接用余弦相似度匹配。
+    不再需要音频切片 + 8003 MFCC 提取。
     """
+    logger.info(f"[声纹识别] 开始处理 {len(segments)} 个 segment (CAM++ 直接匹配)")
     recognized_segments = []
     for seg in segments:
-        # 统一从 8003 提取 MFCC embedding（256-dim，与注册声纹同空间）
-        # 不使用 8002 CAM++ embedding —— 维度不兼容
-        embedding = None
-        if audio_path and seg.get("start_time") is not None:
-            embedding = _extract_segment_embedding(
-                audio_path,
-                seg.get("start_time"),
-                seg.get("end_time"),
-            )
+        embedding = seg.get("embedding")
+        seq = seg.get("sequence", "?")
+        spk = seg.get("speaker_label", "?")
+        st = seg.get("start_time")
+        et = seg.get("end_time")
+        ctx = f"seg#{seq} {spk} {st}s–{et}s"
 
-        if embedding:
-            employee_id, confidence = _recognize_speaker(db, embedding)
+        if embedding and isinstance(embedding, list) and len(embedding) > 0:
+            employee_id, confidence = _recognize_speaker(db, embedding, context=ctx)
         else:
+            logger.info(f"[声纹识别] {ctx}: 无 CAM++ embedding，跳过匹配")
             employee_id, confidence = None, 0.0
 
         recognized_segments.append({
@@ -655,51 +682,25 @@ def run_transcribe_meeting(meeting_id: int) -> dict:
             return {"error": meeting.asr_error}
 
         try:
-            # ─── Step 1: 获取音频时长，决定走哪条 pipeline ───
-            audio_duration = _get_audio_duration(audio_path)
-
-            # 短音频（< 5 分钟）直接用 8002 联合模式，避免 pyannote 过度切分导致大量碎片请求
-            SHORT_AUDIO_THRESHOLD = 300.0  # 5 分钟
-
-            if audio_duration and audio_duration < SHORT_AUDIO_THRESHOLD:
-                # ✅ 快速路径：8002 联合模式（ASR + 说话人标注一起做）
-                pipeline_mode = "asr-fast"
-                logger.info(
-                    f"会议 {meeting_id}: 短音频 ({audio_duration:.0f}s), 直接使用 8002 联合模式"
-                )
-                data = _call_asr_api(audio_path)
-                all_segments = _parse_asr_response(data)
-            else:
-                # ⚠️ 长音频：尝试 pyannote 说话人分离
-                diar_result = _call_diarization_api(audio_path)
-
-                if diar_result and diar_result.get("segments"):
-                    # ✅ Plan A: pyannote 精准边界 → 切片 → 并行 ASR
-                    pipeline_mode = "pyannote+asr"
-                    logger.info(
-                        f"会议 {meeting_id}: 使用 Plan A (pyannote 说话人分离), "
-                        f"{diar_result['num_speakers']} 个说话人, "
-                        f"{len(diar_result['segments'])} 个段落"
-                    )
-                    all_segments = _transcribe_segments_parallel(
-                        audio_path, diar_result["segments"]
-                    )
-                else:
-                    # ⚠️ 回退：8002 联合模式（ASR + 说话人标注一起做）
-                    pipeline_mode = "asr-fallback"
-                    logger.info(f"会议 {meeting_id}: pyannote 不可用, 回退到 8002 联合模式")
-                    data = _call_asr_api(audio_path)
-                    all_segments = _parse_asr_response(data)
+            # ─── Step 1: FunASR 统一转写 (VAD + ASR + CAM++ embedding + 说话人聚类) ───
+            pipeline_mode = "funasr"
+            logger.info(f"会议 {meeting_id}: 调用 FunASR 统一转写...")
+            funasr_result = _call_funasr_transcribe(audio_path)
+            all_segments = funasr_result.get("segments", [])
+            logger.info(
+                f"会议 {meeting_id}: FunASR 返回 {len(all_segments)} 段, "
+                f"{funasr_result.get('num_speakers', '?')} 说话人"
+            )
 
         except Exception as exc:
             meeting.status = MeetingStatus.failed
-            meeting.asr_error = str(exc)
+            meeting.asr_error = f"FunASR 转写失败: {exc}"
             db.commit()
             return {"error": str(exc)}
 
-        # ─── Step 2: 声纹识别（每段 → 8003 embedding → 员工匹配）───
+        # ─── Step 2: 声纹识别（用 FunASR 返回的 CAM++ embedding 直接匹配）───
         recognized_segments = _recognize_meeting_speakers(
-            db, meeting_id, all_segments, audio_path=audio_path
+            db, meeting_id, all_segments
         )
 
         # ─── Step 3: 持久化 TranscriptSegment ───

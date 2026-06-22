@@ -45,30 +45,29 @@ class VoicePrintService:
     
     async def extract_voice_embedding(self, audio_path: Path) -> list[float] | None:
         """
-        调用本地 8003 声纹服务提取 MFCC 256-dim 特征向量。
+        调用 FunASR 的 CAM++ 模型提取声纹 embedding。
 
-        8002 只对多人会议输出 CAM++ embedding，单人声纹注册不适用。
-        改用 8003 MFCC —— 稳定且注册/识别同空间。
+        与转写 pipeline 使用相同的 CAM++ 模型，确保注册和识别的向量空间一致。
         """
         import aiofiles
 
         try:
-            embedding_url = getattr(settings, "embedding_url", "http://localhost:8003")
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            funasr_url = getattr(settings, "funasr_url", "http://localhost:8005")
+            async with httpx.AsyncClient(timeout=120.0) as client:
                 async with aiofiles.open(audio_path, "rb") as f:
                     audio_data = await f.read()
                 files = {"file": (audio_path.name, audio_data, "audio/wav")}
                 resp = await client.post(
-                    f"{embedding_url}/api/embeddings",
+                    f"{funasr_url}/api/embeddings",
                     files=files,
                 )
                 resp.raise_for_status()
                 data = resp.json()
                 embedding = data.get("embedding")
                 if embedding and isinstance(embedding, list):
-                    logger.info(f"8003 提取到 {len(embedding)}-dim MFCC embedding")
+                    logger.info(f"FunASR CAM++ 提取 {len(embedding)}-dim embedding")
                     return embedding
-                logger.warning(f"8003 响应格式不正确: {list(data.keys())}")
+                logger.warning(f"FunASR 响应格式不正确: {list(data.keys())}")
                 return None
         except Exception as e:
             logger.error(f"声纹特征提取失败: {type(e).__name__}: {e}")

@@ -12,14 +12,18 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 1440
 
+    # ── FunASR 统一语音服务（替换旧的 ASR+声纹分离+pipeline）──
+    funasr_url: str = "http://localhost:8005"
+
+    # ── DEPRECATED: 以下旧服务配置，FunASR 上线后移除 ──
     asr_url: str = "http://192.168.10.11:8001"
     asr_diarize_url: str = "http://192.168.10.11:8002/api/transcribe"
+    embedding_url: str = "http://localhost:8003"
+    diarization_url: str = "http://localhost:8004"
+
     llm_url: str = "http://192.168.10.11:8080/v1"
     llm_model: str = "qwen2.5-72b-instruct"
     llm_api_key: str = "not-needed"
-
-    embedding_url: str = "http://localhost:8003"
-    diarization_url: str = "http://localhost:8004"
 
     nas_path: str = "./data/nas/meetings"
     api_host: str = "0.0.0.0"
