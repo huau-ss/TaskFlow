@@ -564,9 +564,10 @@ def _extract_segment_embedding(audio_path: Path, start_time: float | None, end_t
 
 def _recognize_meeting_speakers(db, meeting_id: int, segments: list[dict], audio_path: Path | None = None) -> list[dict]:
     """
-    对会议的每个片段进行说话人识别
+    对会议的每个片段进行说话人识别。
 
-    优先使用 ASR 返回的 embedding，如果没有则用本地 embedding 服务从音频片段中提取。
+    统一使用 8003 MFCC 256-dim embedding —— 与注册声纹同空间，确保余弦相似度有效。
+    8002 的 CAM++ embedding 维度不固定（512/1024），与注册的 MFCC 256 不兼容，不使用。
 
     Args:
         db: 数据库会话
@@ -579,10 +580,10 @@ def _recognize_meeting_speakers(db, meeting_id: int, segments: list[dict], audio
     """
     recognized_segments = []
     for seg in segments:
-        embedding = seg.get("embedding")
-
-        # 如果 ASR 没返回 embedding，从音频片段中提取
-        if not embedding and audio_path and seg.get("start_time") is not None:
+        # 统一从 8003 提取 MFCC embedding（256-dim，与注册声纹同空间）
+        # 不使用 8002 CAM++ embedding —— 维度不兼容
+        embedding = None
+        if audio_path and seg.get("start_time") is not None:
             embedding = _extract_segment_embedding(
                 audio_path,
                 seg.get("start_time"),
