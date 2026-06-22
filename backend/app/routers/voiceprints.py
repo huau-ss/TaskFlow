@@ -85,7 +85,7 @@ async def register_voice_print(
         voice_print = service.register_voice_print(
             employee_id=employee_id,
             embedding=embedding,
-            source_audio_path=str(temp_path),
+            source_audio_path=str(wav_path),
             audio_duration=len(content) / 16000 / 2,  # 估算时长
             note=note,
             is_verified=False
@@ -161,7 +161,7 @@ async def register_voice_print_base64(
         voice_print = service.register_voice_print(
             employee_id=req.employee_id,
             embedding=embedding,
-            source_audio_path=str(temp_path),
+            source_audio_path=str(wav_path),
             audio_duration=len(audio_data) / 16000 / 2,
             note=req.note,
             is_verified=False
