@@ -168,15 +168,28 @@ def _slice_audio(audio_path: Path, start: float, end: float) -> Path:
     return Path(tmp_path)
 
 
-def _call_asr_transcribe(audio_path: Path) -> str:
+def _call_asr_transcribe(audio_path: Path) -> tuple[str, list[float] | None]:
     """
-    对单个音频片段调用 8002 ASR 转写，返回纯文本。
+    对单个音频片段调用 8002 ASR 转写，返回 (文本, 声纹embedding)。
 
-    与 _call_asr_api 不同，此函数专用于短音频片段（pyannote 切分后的单个说话人段落），
-    只关心转写文本，不关心说话人标注。支持 8002 的同步和异步两种模式。
+    与 _call_asr_api 不同，此函数专用于短音频片段（pyannote 切分后的单个说话人段落）。
+    同时从 8002 响应中提取 CAM++ embedding（与注册声纹同空间），避免后续调 8003。
+
+    支持 8002 的同步和异步两种模式。
     """
     if settings.mock_asr:
-        return "[Mock] 模拟转写文本"
+        return ("[Mock] 模拟转写文本", None)
+
+    def _extract_text_and_embedding(data: dict | list) -> tuple[str, list[float] | None]:
+        """从 ASR 响应中同时提取文本和 embedding"""
+        segments = _parse_asr_response(data)
+        text = " ".join(s["text"] for s in segments if s["text"].strip())
+        # 提取首个有效的 embedding（8002 CAM++ 格式）
+        for s in segments:
+            emb = s.get("embedding")
+            if emb and isinstance(emb, list) and len(emb) > 0:
+                return (text, emb)
+        return (text, None)
 
     with httpx.Client(timeout=600.0) as client:
         with open(audio_path, "rb") as f:
@@ -189,23 +202,20 @@ def _call_asr_transcribe(audio_path: Path) -> str:
         try:
             data = resp.json()
         except Exception:
-            # 可能是纯文本或 Markdown 返回
+            # 可能是纯文本或 Markdown 返回（无 embedding）
             md_text = resp.text
             parsed = _parse_markdown_transcript(md_text)
-            segments = _parse_asr_response(parsed)
-            return " ".join(s["text"] for s in segments if s["text"].strip()) or md_text.strip()
+            text, _ = _extract_text_and_embedding(parsed)
+            return (text or md_text.strip(), None)
 
-        # 同步模式：直接返回了 segments 或 text
+        # 同步模式：直接返回了 segments/utterances/results/text
         if "segments" in data or "utterances" in data or "results" in data or "text" in data:
-            segments = _parse_asr_response(data)
-            return " ".join(s["text"] for s in segments if s["text"].strip())
+            return _extract_text_and_embedding(data)
 
         # 异步模式：轮询等待结果
         task_id = data.get("task_id")
         if not task_id:
-            # 未知格式，尽力提取文本
-            segments = _parse_asr_response(data)
-            return " ".join(s["text"] for s in segments if s["text"].strip())
+            return _extract_text_and_embedding(data)
 
         base_url = settings.asr_diarize_url.rsplit("/api", 1)[0]
         for _ in range(200):  # 最多等待 ~10 分钟
@@ -224,13 +234,12 @@ def _call_asr_transcribe(audio_path: Path) -> str:
 
                 try:
                     result_data = result_resp.json()
-                    segments = _parse_asr_response(result_data)
-                    return " ".join(s["text"] for s in segments if s["text"].strip())
+                    return _extract_text_and_embedding(result_data)
                 except Exception:
                     md_text = result_resp.text
                     parsed = _parse_markdown_transcript(md_text)
-                    segments = _parse_asr_response(parsed)
-                    return " ".join(s["text"] for s in segments if s["text"].strip()) or md_text.strip()
+                    text, _ = _extract_text_and_embedding(parsed)
+                    return (text or md_text.strip(), None)
 
         raise Exception("ASR 转写超时")
 
@@ -255,13 +264,13 @@ def _transcribe_segments_parallel(audio_path: Path, diar_segments: list[dict]) -
         sliced_path = None
         try:
             sliced_path = _slice_audio(audio_path, seg["start"], seg["end"])
-            text = _call_asr_transcribe(sliced_path)
+            text, embedding = _call_asr_transcribe(sliced_path)
             return idx, {
                 "speaker_label": seg["speaker"],
                 "text": text,
                 "start_time": seg["start"],
                 "end_time": seg["end"],
-                "embedding": None,  # 稍后由 _recognize_meeting_speakers 提取
+                "embedding": embedding,  # 8002 CAM++ embedding（与注册声纹同空间）
                 "sequence": idx,
             }
         except Exception as e:
@@ -498,7 +507,11 @@ def _extract_speaker_embedding_from_audio(
 
 
 def _extract_segment_embedding(audio_path: Path, start_time: float | None, end_time: float | None) -> list[float] | None:
-    """从完整音频中截取片段，调用本地 embedding 服务提取声纹向量"""
+    """从完整音频中截取片段，通过 8002 ASR 服务提取 CAM++ 声纹向量（与注册声纹同空间）。
+
+    注意：8002 没有独立的 /api/embeddings 端点，embedding 嵌入在 /api/transcribe 响应的
+    每个 segment 中。此函数切片后调用 8002 转写接口，从响应中提取 embedding。
+    """
     if start_time is None:
         return None
 
@@ -507,8 +520,6 @@ def _extract_segment_embedding(audio_path: Path, start_time: float | None, end_t
         duration = end_time - start_time
     else:
         duration = 5.0  # 默认截取 5 秒
-
-    embedding_url = getattr(settings, "embedding_url", "http://localhost:8003")
 
     try:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -530,16 +541,51 @@ def _extract_segment_embedding(audio_path: Path, start_time: float | None, end_t
         if result.returncode != 0 or not Path(tmp_path).exists():
             return None
 
-        # 调用本地 embedding 服务
+        # 调用 8002 转写接口获取 CAM++ embedding（与注册声纹同空间）
         with open(tmp_path, "rb") as f:
             resp = httpx.post(
-                f"{embedding_url}/api/embeddings",
-                files={"file": ("segment.wav", f, "audio/wav")},
-                timeout=30.0,
+                settings.asr_diarize_url,
+                files={"env_audio": ("segment.wav", f, "audio/wav")},
+                timeout=60.0,
             )
         resp.raise_for_status()
         data = resp.json()
-        return data.get("embedding")
+
+        # 从响应中提取 embedding（8002 可能同步或异步返回）
+        # 尝试同步格式
+        segments = _parse_asr_response(data)
+        for s in segments:
+            emb = s.get("embedding")
+            if emb and isinstance(emb, list) and len(emb) > 0:
+                return emb
+
+        # 异步模式：简单轮询
+        task_id = data.get("task_id")
+        if task_id:
+            base_url = settings.asr_diarize_url.rsplit("/api", 1)[0]
+            with httpx.Client(timeout=120.0) as client:
+                for _ in range(60):
+                    time.sleep(2)
+                    sr = client.get(f"{base_url}/api/status/{task_id}")
+                    sr.raise_for_status()
+                    sd = sr.json()
+                    if sd.get("status") == "failed":
+                        break
+                    if sd.get("status") in ("done", "completed"):
+                        rr = client.get(f"{base_url}/api/result/{task_id}")
+                        rr.raise_for_status()
+                        try:
+                            rd = rr.json()
+                            rsegs = _parse_asr_response(rd)
+                            for s in rsegs:
+                                emb = s.get("embedding")
+                                if emb and isinstance(emb, list) and len(emb) > 0:
+                                    return emb
+                        except Exception:
+                            pass
+                        break
+
+        return None
 
     except Exception as e:
         logger.warning(f"提取片段声纹失败: {e}")

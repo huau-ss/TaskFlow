@@ -45,37 +45,100 @@ class VoicePrintService:
     
     async def extract_voice_embedding(self, audio_path: Path) -> list[float] | None:
         """
-        调用 ASR 服务提取声纹特征向量
+        调用 8002 ASR 服务的转写接口提取 CAM++ 声纹特征向量。
 
-        ASR 服务需要返回 embedding 数据，格式示例：
-        {
-            "embedding": [0.123, -0.456, ...],  # 512维或1024维向量
-            "duration": 5.2
-        }
+        embedding 嵌入在 /api/transcribe 响应的每个 segment 中。
+        注册时只上传单人短音频，提取第一个有效 embedding。
+        8002 对音频做完整 diarization+ASR+embedding，需轮询等待（最长 10 分钟）。
         """
-        import aiofiles
-
-        embedding_url = getattr(settings, "embedding_url", "http://localhost:8003")
+        import asyncio
 
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                async with aiofiles.open(audio_path, "rb") as f:
-                    audio_data = await f.read()
-                files = {"file": (audio_path.name, audio_data, "audio/wav")}
+            async with httpx.AsyncClient(timeout=600.0) as client:
+                # 调用 8002 转写接口（embedding 嵌在 segment 响应中）
+                with open(audio_path, "rb") as f:
+                    audio_data = f.read()
+                files = {"env_audio": (audio_path.name, audio_data, "audio/wav")}
                 resp = await client.post(
-                    f"{embedding_url}/api/embeddings",
-                    files=files
+                    settings.asr_diarize_url,
+                    files=files,
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                embedding = data.get("embedding")
-                if embedding and isinstance(embedding, list):
+
+                # 从转写响应的 segment 中提取 CAM++ embedding
+                embedding = self._extract_embedding_from_asr_response(data)
+                if embedding:
+                    logger.info(f"从 8002 同步响应中提取到 {len(embedding)}-dim embedding")
                     return embedding
-                logger.warning(f"Embedding 服务返回格式不正确: {data}")
+
+                # 异步模式：轮询等待（8002 做 diarization+ASR，可能很慢）
+                task_id = data.get("task_id")
+                if task_id:
+                    logger.info(f"8002 异步任务 {task_id}，等待 embedding...")
+                    base_url = settings.asr_diarize_url.rsplit("/api", 1)[0]
+                    for i in range(300):  # 最多等待 10 分钟（2s * 300）
+                        await asyncio.sleep(2)
+                        try:
+                            sr = await client.get(f"{base_url}/api/status/{task_id}")
+                            sr.raise_for_status()
+                            sd = sr.json()
+                        except Exception:
+                            continue  # 网络抖动，重试
+                        status = sd.get("status", "")
+                        if status == "failed":
+                            logger.warning(f"8002 任务 {task_id} 失败: {sd.get('error')}")
+                            break
+                        if status in ("done", "completed"):
+                            try:
+                                rr = await client.get(f"{base_url}/api/result/{task_id}")
+                                rr.raise_for_status()
+                                rd = rr.json()
+                            except Exception:
+                                continue
+                            embedding = self._extract_embedding_from_asr_response(rd)
+                            if embedding:
+                                logger.info(f"8002 异步完成，提取到 {len(embedding)}-dim embedding")
+                                return embedding
+                            logger.warning(f"8002 结果中未找到 embedding，keys={list(rd.keys())}")
+                            break
+                    else:
+                        logger.warning(f"8002 任务 {task_id} 轮询超时（10分钟）")
+
+                else:
+                    logger.warning(f"8002 响应中无 task_id 也无 embedding，keys={list(data.keys())}")
+
                 return None
         except Exception as e:
-            logger.error(f"声纹特征提取失败: {e}")
+            logger.error(f"声纹特征提取失败: {type(e).__name__}: {e}")
             return None
+
+    @staticmethod
+    def _extract_embedding_from_asr_response(data: dict | list) -> list[float] | None:
+        """从 8002 ASR 响应中提取首个有效的 CAM++ embedding"""
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    emb = item.get("embedding")
+                    if emb and isinstance(emb, list) and len(emb) > 0:
+                        return emb
+            return None
+
+        if isinstance(data, dict):
+            for key in ("segments", "utterances", "results"):
+                items = data.get(key)
+                if isinstance(items, list):
+                    for item in items:
+                        if isinstance(item, dict):
+                            emb = item.get("embedding")
+                            if emb and isinstance(emb, list) and len(emb) > 0:
+                                return emb
+            # 顶层 embedding
+            emb = data.get("embedding")
+            if emb and isinstance(emb, list) and len(emb) > 0:
+                return emb
+
+        return None
     
     def register_voice_print(
         self,
