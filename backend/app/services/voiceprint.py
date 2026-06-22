@@ -55,10 +55,13 @@ class VoicePrintService:
 
         try:
             async with httpx.AsyncClient(timeout=600.0) as client:
-                # 调用 8002 转写接口（embedding 嵌在 segment 响应中）
+                # 调用 8002 转写接口（强制 JSON 模式以获取 CAM++ embedding）
                 with open(audio_path, "rb") as f:
                     audio_data = f.read()
-                files = {"env_audio": (audio_path.name, audio_data, "audio/wav")}
+                files = {
+                    "env_audio": (audio_path.name, audio_data, "audio/wav"),
+                    "mode": (None, "json"),  # 强制 JSON 输出，否则单人音频会返回 Markdown
+                }
                 resp = await client.post(
                     settings.asr_diarize_url,
                     files=files,
@@ -95,12 +98,15 @@ class VoicePrintService:
                                 rr.raise_for_status()
                                 rd = rr.json()
                             except Exception:
-                                continue
+                                # JSON 解析失败，可能是 Markdown 格式
+                                raw_text = rr.text[:200] if 'rr' in dir() else "(empty)"
+                                logger.warning(f"8002 返回非 JSON 格式（Markdown），无 embedding: {raw_text}")
+                                break
                             embedding = self._extract_embedding_from_asr_response(rd)
                             if embedding:
                                 logger.info(f"8002 异步完成，提取到 {len(embedding)}-dim embedding")
                                 return embedding
-                            logger.warning(f"8002 结果中未找到 embedding，keys={list(rd.keys())}")
+                            logger.warning(f"8002 JSON 结果中未找到 embedding，keys={list(rd.keys())}")
                             break
                     else:
                         logger.warning(f"8002 任务 {task_id} 轮询超时（10分钟）")
