@@ -23,7 +23,7 @@ from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models import Meeting, MeetingRelation, MeetingStatus, RelationType, TranscriptSegment
+from app.models import Meeting, MeetingRelation, MeetingStatus, RelationType
 
 
 class RelationState(TypedDict, total=False):
@@ -77,12 +77,11 @@ async def _load_meetings(db: AsyncSession, meeting_ids: list[int] | None = None)
     result = await db.execute(query.order_by(Meeting.created_at))
     meetings = result.scalars().all()
 
+    from app.services.transcript_segment_storage import get_meeting_segments_async
+
     meeting_summaries = []
     for m in meetings:
-        seg_result = await db.execute(
-            select(TranscriptSegment).where(TranscriptSegment.meeting_id == m.id).order_by(TranscriptSegment.sequence)
-        )
-        segments = seg_result.scalars().all()
+        segments = await get_meeting_segments_async(db, m.id)
 
         full_text = "\n".join(
             f"[{s.speaker_label}]: {s.text}" for s in segments

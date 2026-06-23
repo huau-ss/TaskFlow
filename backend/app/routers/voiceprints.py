@@ -339,7 +339,12 @@ async def recognize_meeting_speakers(
     await db.commit()
     logger.info(f"[recognize-meeting] 更新 {updated} 个片段的 employee_id")
 
-    return _build_response(meeting, speaker_match, label_to_name)
+    # 回填后从 NAS 重新读取（NAS 已有最新数据），兜底 DB
+    from app.services.transcript_segment_storage import get_meeting_segments_async
+    segments = await get_meeting_segments_async(db, meeting_id)
+    return _build_response_from_segments(
+        meeting.id, meeting.status, segments, speaker_match, label_to_name
+    )
 
 
 def _build_response(
@@ -380,5 +385,47 @@ def _build_response(
     return TranscriptWithSpeakers(
         meeting_id=meeting.id,
         status=meeting.status,
+        segments=segs,
+    )
+
+
+def _build_response_from_segments(
+    meeting_id: int,
+    status: MeetingStatus,
+    segments: list,
+    speaker_match: dict[str, tuple[int | None, float]] | None = None,
+    label_to_name: dict[str, str] | None = None,
+) -> TranscriptWithSpeakers:
+    """从片段列表构造响应（NAS-first 读取后使用）"""
+    segs = []
+    for seg in sorted(segments, key=lambda s: s.sequence):
+        emp_id = None
+        conf = None
+        if speaker_match is not None:
+            emp_id, conf = speaker_match.get(seg.speaker_label, (None, 0.0))
+        else:
+            emp_id = getattr(seg, "employee_id", None)
+            conf = 1.0 if emp_id else None
+
+        emp_name = None
+        if label_to_name:
+            emp_name = label_to_name.get(seg.speaker_label)
+
+        segs.append(
+            TranscriptSegmentWithSpeaker(
+                id=getattr(seg, "id", 0),
+                speaker_label=getattr(seg, "speaker_label", "?"),
+                employee_id=emp_id,
+                employee_name=emp_name,
+                text=getattr(seg, "text", ""),
+                start_time=getattr(seg, "start_time", None),
+                end_time=getattr(seg, "end_time", None),
+                sequence=getattr(seg, "sequence", 0),
+                confidence=conf,
+            )
+        )
+    return TranscriptWithSpeakers(
+        meeting_id=meeting_id,
+        status=status,
         segments=segs,
     )

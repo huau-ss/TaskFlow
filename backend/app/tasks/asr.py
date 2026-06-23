@@ -765,6 +765,28 @@ def run_transcribe_meeting(meeting_id: int) -> dict:
         meeting.status = MeetingStatus.transcribed
         meeting.asr_error = None
         db.commit()
+
+        # NAS 写入在 DB commit 之后，失败不影响已提交数据
+        from app.services.transcript_segment_storage import save_segments
+        saved = save_segments(
+            meeting_id,
+            [
+                {
+                    "id": seg.id,
+                    "speaker_label": seg.speaker_label,
+                    "employee_id": seg.employee_id,
+                    "text": seg.text,
+                    "start_time": seg.start_time,
+                    "end_time": seg.end_time,
+                    "sequence": seg.sequence,
+                }
+                for seg in db.query(TranscriptSegment).filter(
+                    TranscriptSegment.meeting_id == meeting_id
+                ).all()
+            ],
+        )
+        if saved:
+            logger.info(f"会议 {meeting_id} 转写片段已备份至 NAS: {saved}")
     # ── sync session closed here ──
 
     # ── Phase 2: 任务提取 + 通知（sync，无 asyncio.run 开销）──

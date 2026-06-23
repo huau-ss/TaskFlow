@@ -21,11 +21,12 @@ class Settings(BaseSettings):
     embedding_url: str = "http://localhost:8003"
     diarization_url: str = "http://localhost:8004"
 
-    llm_url: str = "http://192.168.10.11:8080/v1"
-    llm_model: str = "qwen2.5-72b-instruct"
+    llm_url: str = "http://192.168.10.12/8000/v1"
+    llm_model: str = "qwen3-72b-instruct"
     llm_api_key: str = "not-needed"
 
-    nas_path: str = "./data/nas/meetings"
+    nas_path: str = "/home/admin/nas/meetings"
+    transcript_segments_path: str = "/home/admin/nas/meetings/transcript_segments"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     cors_origins: str = "*"

@@ -89,15 +89,12 @@ async def get_transcript(
     db: AsyncSession = Depends(get_db),
     _: Employee = Depends(get_current_user),
 ):
-    result = await db.execute(
-        select(Meeting)
-        .options(selectinload(Meeting.segments))
-        .where(Meeting.id == meeting_id)
-    )
-    meeting = result.scalar_one_or_none()
+    meeting = await db.get(Meeting, meeting_id)
     if not meeting:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
-    segments = sorted(meeting.segments, key=lambda s: s.sequence)
+
+    from app.services.transcript_segment_storage import get_meeting_segments_async
+    segments = await get_meeting_segments_async(db, meeting_id)
     return TranscriptResponse(
         meeting_id=meeting.id,
         status=meeting.status,
