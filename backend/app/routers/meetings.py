@@ -269,10 +269,10 @@ async def list_meeting_relations(
             confidence=r.confidence,
             reason=r.reason,
             created_at=r.created_at,
-            meeting_a_title=meetings_map.get(r.meeting_a_id, None).__dict__.get("title"),
-            meeting_b_title=meetings_map.get(r.meeting_b_id, None).__dict__.get("title"),
-            meeting_a_created_at=meetings_map.get(r.meeting_a_id, None).__dict__.get("created_at"),
-            meeting_b_created_at=meetings_map.get(r.meeting_b_id, None).__dict__.get("created_at"),
+            meeting_a_title=getattr(meetings_map.get(r.meeting_a_id), "title", None),
+            meeting_b_title=getattr(meetings_map.get(r.meeting_b_id), "title", None),
+            meeting_a_created_at=getattr(meetings_map.get(r.meeting_a_id), "created_at", None),
+            meeting_b_created_at=getattr(meetings_map.get(r.meeting_b_id), "created_at", None),
         )
         for r in relations
     ]

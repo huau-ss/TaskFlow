@@ -133,33 +133,37 @@ async def _call_llm(meetings: list[dict]) -> list[dict]:
 
 
 async def _persist_relations(db: AsyncSession, relations: list[dict]) -> list[MeetingRelation]:
-    """持久化关联关系，返回新创建的 MeetingRelation 列表"""
-    created = []
+    """持久化关联关系，返回新增或更新的 MeetingRelation 列表。
+
+    存储规则：meeting_a_id < meeting_b_id（唯一约束）。
+    - follow_up / prerequisite：A 是前序/前置，B 是后续/后置
+    - related：无方向语义，小 ID 为 A
+    """
+    created_or_updated: list[MeetingRelation] = []
     for rel in relations:
         meeting_a_id = rel.get("meeting_a_id")
         meeting_b_id = rel.get("meeting_b_id")
         if not meeting_a_id or not meeting_b_id or meeting_a_id == meeting_b_id:
             continue
 
-        # 保证小 ID 在前，避免同一对会议正反各存一条
-        a_id, b_id = (meeting_a_id, meeting_b_id) if meeting_a_id < meeting_b_id else (meeting_b_id, meeting_a_id)
+        # 统一小 ID 在前，符合数据库唯一约束
+        stored_a_id, stored_b_id = (
+            (meeting_a_id, meeting_b_id)
+            if meeting_a_id < meeting_b_id
+            else (meeting_b_id, meeting_a_id)
+        )
 
-        # 关联类型方向性处理
+        # 关联类型：follow_up / prerequisite 有方向性
         relation_type_str = rel.get("relation_type", "related")
         try:
             rel_type = RelationType(relation_type_str)
         except ValueError:
             rel_type = RelationType.related
 
-        # follow_up 和 prerequisite 是有方向的，需要确认方向是否正确
-        if rel_type in (RelationType.follow_up, RelationType.prerequisite):
-            # LLM 输出的 meeting_a_id 是前序，meeting_b_id 是后序
-            stored_a_id, stored_b_id = meeting_a_id, meeting_b_id
-        else:
-            # related 无方向，小在前
-            stored_a_id, stored_b_id = a_id, b_id
+        confidence = float(rel.get("confidence", 0))
+        reason = rel.get("reason")
 
-        # 检查是否已存在
+        # 检查是否已存在（按唯一约束查询）
         existing = await db.execute(
             select(MeetingRelation).where(
                 and_(
@@ -170,25 +174,24 @@ async def _persist_relations(db: AsyncSession, relations: list[dict]) -> list[Me
         )
         existing_rel = existing.scalar_one_or_none()
         if existing_rel:
-            # 更新置信度和理由
-            existing_rel.confidence = float(rel.get("confidence", 0))
-            existing_rel.reason = rel.get("reason")
+            existing_rel.confidence = confidence
+            existing_rel.reason = reason
             existing_rel.relation_type = rel_type
             db.add(existing_rel)
-            created.append(existing_rel)
+            created_or_updated.append(existing_rel)
         else:
             new_rel = MeetingRelation(
                 meeting_a_id=stored_a_id,
                 meeting_b_id=stored_b_id,
                 relation_type=rel_type,
-                confidence=float(rel.get("confidence", 0)),
-                reason=rel.get("reason"),
+                confidence=confidence,
+                reason=reason,
             )
             db.add(new_rel)
             await db.flush()
-            created.append(new_rel)
+            created_or_updated.append(new_rel)
 
-    return created
+    return created_or_updated
 
 
 async def analyze_relations(
