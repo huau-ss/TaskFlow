@@ -206,17 +206,20 @@ async def create_response_message(
     recipient_id: int,
     action: str,
     actor_name: str,
+    reason: str | None = None,
 ) -> Message:
     """创建任务回复通知消息（如员工接受了任务，通知创建者）"""
     action_text = {
         "accept": "接受了",
-        "rejected": "拒绝了",
-        "completed": "完成了",
+        "reject": "拒绝了",
+        "complete": "完成了",
         "incomplete": "标记未完成",
     }.get(action, action)
 
     title = f"📝 任务状态更新：{task.title}"
     content = f"员工「{actor_name}」{action_text}了任务「{task.title}」。"
+    if reason:
+        content += f"\n\n理由：{reason}"
 
     return await create_message(
         db,
