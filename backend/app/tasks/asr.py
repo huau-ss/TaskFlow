@@ -335,11 +335,10 @@ def _transcribe_segments_parallel(audio_path: Path, diar_segments: list[dict]) -
 
     # 过滤掉 None 和文本为空的段落
     filtered = [r for r in results if r is not None]
-    valid = [r for r in filtered if r["text"].strip()]
     none_count = sum(1 for r in results if r is None)
     if none_count:
         logger.warning(f"{none_count}/{n} 个段落的转写结果丢失（future 未完成）")
-    logger.info(f"并行转写完成: {len(valid)}/{n} 个段落有有效文本")
+    logger.info(f"并行转写完成: {sum(1 for r in filtered if r['text'].strip())}/{n} 个段落有有效文本")
     return filtered
 
 
@@ -825,9 +824,47 @@ def run_transcribe_meeting(meeting_id: int) -> dict:
     }
 
 
+def _is_transient_failure(result: dict) -> bool:
+    """判断转写失败是否应该重试。
+
+    OOM、HTTP 5xx、网络超时属于瞬时故障，重试有意义；
+    业务错误（音频不存在、无有效语音段）重试无法解决，不重试。
+    """
+    if "error" not in result:
+        return False
+    err = result["error"].lower()
+
+    # 资源/服务端瞬时故障 — 应该重试
+    transient_keywords = [
+        "oom", "out of memory", "memory error", "memoryerror",
+        "connection refused", "connection reset",
+        "read timeout", "timed out",
+        "502", "503", "504",
+        "internal server error", "bad gateway", "service unavailable",
+        "killed", "signal", "core dumped",
+    ]
+    return any(kw in err for kw in transient_keywords)
+
+
 @celery_app.task(name="transcribe_meeting", bind=True, max_retries=3)
 def transcribe_meeting(self, meeting_id: int) -> dict:
+    # 重试前先将状态恢复为 pending，让前端看到"正在重新处理"而非一直"失败"
+    if self.request.retries > 0:
+        with SyncSession() as retry_db:
+            meeting = retry_db.get(Meeting, meeting_id)
+            if meeting:
+                meeting.status = MeetingStatus.pending
+                retry_db.commit()
+
     result = run_transcribe_meeting(meeting_id)
-    if "error" in result and self.request.retries < self.max_retries:
-        raise self.retry(exc=Exception(result["error"]), countdown=60)
+
+    # 仅对瞬时故障重试；业务错误（文件不存在、音频无语音等）直接放弃
+    if "error" in result:
+        if _is_transient_failure(result):
+            countdown = 60 + 60 * self.request.retries  # 60s → 120s → 180s
+            raise self.retry(
+                exc=Exception(result["error"]),
+                countdown=countdown,
+            )
+        # 业务错误：已是最终状态，不重试
     return result

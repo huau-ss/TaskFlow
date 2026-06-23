@@ -8,7 +8,7 @@ from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.deps import get_current_user
-from app.models import Employee, Task, TaskStatus, Message, MessageType
+from app.models import Employee, Task, TaskStatus, Message
 from app.schemas import (
     TaskDetailResponse,
     TaskListResponse,
@@ -65,8 +65,6 @@ async def list_tasks(
             executor_id=t.executor_id,
             meeting_id=t.meeting_id,
             source_segment_ids=t.source_segment_ids,
-            match_method=t.match_method,
-            match_confidence=t.match_confidence,
             created_at=t.created_at,
             executor_name=t.executor.name if t.executor else None,
             meeting_title=t.meeting.title if t.meeting else None,
@@ -103,8 +101,6 @@ async def get_task(
         executor_id=task.executor_id,
         meeting_id=task.meeting_id,
         source_segment_ids=task.source_segment_ids,
-        match_method=task.match_method,
-        match_confidence=task.match_confidence,
         created_at=task.created_at,
         executor_name=task.executor.name if task.executor else None,
         meeting_title=task.meeting.title if task.meeting else None,
@@ -143,19 +139,13 @@ async def reply_to_task(
         "accept": TaskStatus.in_progress,
         "reject": TaskStatus.rejected,
         "complete": TaskStatus.completed,
-        "incomplete": TaskStatus.overdue,
+        "incomplete": TaskStatus.incomplete,
     }
     task.status = status_mapping[action]
     await db.flush()
 
-    # 记录操作到当前用户的任务创建消息（只匹配 task_created 类型，避免
-    # task_response 等后续通知消息污染查询）
-    msg_query = select(Message).where(
-        Message.task_id == task_id,
-        Message.recipient_id == current_user.id,
-        Message.type == MessageType.task_created,
-        Message.action_token.isnot(None),
-    )
+    # 记录操作到消息
+    msg_query = select(Message).where(Message.task_id == task_id, Message.action_token.isnot(None))
     msg_result = await db.execute(msg_query)
     message = msg_result.scalar_one_or_none()
 
@@ -173,8 +163,7 @@ async def reply_to_task(
 
         if executor and executor.manager_id:
             await message_service.create_response_message(
-                db, task, executor.manager_id, action, executor.name or "未知",
-                reason=body.reason,
+                db, task, executor.manager_id, action, executor.name or "未知"
             )
 
     await db.commit()
@@ -217,7 +206,7 @@ async def reply_to_task_by_token(
         "accept": TaskStatus.in_progress,
         "reject": TaskStatus.rejected,
         "complete": TaskStatus.completed,
-        "incomplete": TaskStatus.overdue,
+        "incomplete": TaskStatus.incomplete,
     }
     task.status = status_mapping[action]
 
@@ -232,8 +221,7 @@ async def reply_to_task_by_token(
 
         if executor and executor.manager_id:
             await message_service.create_response_message(
-                db, task, executor.manager_id, action, executor.name or "未知",
-                reason=body.reason,
+                db, task, executor.manager_id, action, executor.name or "未知"
             )
 
     await db.commit()

@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     llm_model: str = "qwen3-72b-instruct"
     llm_api_key: str = "not-needed"
 
-    nas_path: str = "/home/admin/nas/meetings"
+    nas_path: str = "/home/admin/nas/meetings/audios"
     transcript_segments_path: str = "/home/admin/nas/meetings/transcript_segments"
     api_host: str = "0.0.0.0"
     api_port: int = 8000

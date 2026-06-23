@@ -10,7 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.deps import get_current_user
-from app.models import Employee, MeetingStatus, VoicePrint
+from app.models import Employee, VoicePrint
 from app.schemas import (
     TranscriptSegmentWithSpeaker,
     TranscriptWithSpeakers,
@@ -261,7 +261,7 @@ async def recognize_meeting_speakers(
 
     import httpx
     from app.config import settings
-    from app.models import Meeting, TranscriptSegment
+    from app.models import Meeting, MeetingStatus, TranscriptSegment
 
     meeting = await db.get(Meeting, meeting_id, options=[selectinload(Meeting.segments)])
     if not meeting:
@@ -322,6 +322,7 @@ async def recognize_meeting_speakers(
         speaker_match[spk] = (emp_id, conf)
 
     # 回填到数据库
+    from app.models import Employee
     label_to_name: dict[str, str] = {}
     for spk, (emp_id, _) in speaker_match.items():
         if emp_id is not None:

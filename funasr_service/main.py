@@ -172,32 +172,34 @@ async def transcribe(file: UploadFile = File(...)):
             wav, sr = sf.read(wav_path, dtype="float32")
             dur = len(wav) / sr if sr > 0 else 0
             vad_segments = [{"start": 0.0, "end": dur}]
+        else:
+            # 合并相邻段（使用全局质量控制参数）
+            vad_segments = _merge_vad_segments(vad_segments)
+        logger.info(f"VAD: {len(vad_segments)} 段")
 
-        # 合并相邻段（使用全局质量控制参数）
-        merged = _merge_vad_segments(vad_segments)
-        logger.info(f"VAD: {len(vad_segments)} 段 → 合并为 {len(merged)} 段")
+        # ── Step 2: 一次性加载音频，后续切片全部 in-memory，避免 N 次磁盘读取导致 OOM ──
+        wav_full, sr = sf.read(wav_path, dtype="float32")
+        if len(wav_full.shape) > 1:
+            wav_full = wav_full.mean(axis=1)
 
-        # ── Step 2: 每段 ASR + CAM++ ──────────────────────────────
+        # ── Step 3: 每段 ASR + CAM++ ──────────────────────────────
         segments = []
         embeddings = []
         min_seg_dur = 1.0  # 秒：跳过太短的片段（CAM++ 需要足够语音帧）
 
-        for i, seg in enumerate(merged):
+        for i, seg in enumerate(vad_segments):
             # 跳过过短片段（CAM++ 在 < 1s 语音上不稳定）
             seg_dur = seg["end"] - seg["start"]
             if seg_dur < min_seg_dur:
                 logger.debug(f"跳过过短片段 {i}: {seg_dur:.2f}s < {min_seg_dur}s")
                 continue
 
-            # 截取音频
-            wav, sr = sf.read(wav_path, dtype="float32")
-            if len(wav.shape) > 1:
-                wav = wav.mean(axis=1)
+            # in-memory 切片（wav_full 已在 Step 2 一次性加载）
             start_idx = max(0, int(seg["start"] * sr))
-            end_idx = min(len(wav), int(seg["end"] * sr))
+            end_idx = min(len(wav_full), int(seg["end"] * sr))
             if start_idx >= end_idx:
                 continue
-            sliced = wav[start_idx:end_idx]
+            sliced = wav_full[start_idx:end_idx]
             slice_path = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
             sf.write(slice_path.name, sliced.astype("float32"), sr)
             slice_path.close()

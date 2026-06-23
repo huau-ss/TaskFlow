@@ -34,17 +34,8 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _hasPendingUploads = false;
   bool _voicePrintVisited = false;
   int _unreadMessageCount = 0;
-  final _tasksKey = GlobalKey<TasksScreenState>();
 
   bool get _showVoicePrintTab => widget.api.isAdmin;
-
-  /// 将底部导航栏 tab 索引映射为 IndexedStack 页面索引。
-  /// 管理员有 6 个 tab，非管理员只有 5 个（跳过声纹）。
-  int _toPageIndex(int tabIndex) {
-    if (_showVoicePrintTab) return tabIndex;
-    // 非管理员：tab 2→页面 3(任务), tab 3→页面 4(消息), tab 4→页面 5(我的)
-    return tabIndex < 2 ? tabIndex : tabIndex + 1;
-  }
 
   @override
   void initState() {
@@ -107,14 +98,14 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
       body: IndexedStack(
-        index: _toPageIndex(_tabIndex),
+        index: _tabIndex,
         children: [
           _buildMeetingsList(),
           UploadQueueScreen(uploadQueue: widget.uploadQueue),
           _showVoicePrintTab
               ? (_voicePrintVisited ? VoicePrintManagementScreen(api: widget.api) : const SizedBox.shrink())
               : const _NonAdminPlaceholder(),
-          TasksScreen(key: _tasksKey, api: widget.api),
+          TasksScreen(api: widget.api),
           MessagesScreen(api: widget.api),
           MeScreen(api: widget.api),
         ],
@@ -122,13 +113,13 @@ class _HomeScreenState extends State<HomeScreen> {
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tabIndex,
         onDestinationSelected: (i) {
+          if (!_showVoicePrintTab && i == 2) return;
           setState(() {
             _tabIndex = i;
-            if (_toPageIndex(i) == 2) _voicePrintVisited = true;
+            if (i == 2) _voicePrintVisited = true;
           });
           _loadPendingUploads();
-          if (_toPageIndex(i) == 3) _tasksKey.currentState?.refresh();  // 任务页面
-          if (_toPageIndex(i) == 4) _loadUnreadCount();  // 消息页面
+          if (i == 4) _loadUnreadCount();
         },
         destinations: [
           const NavigationDestination(icon: Icon(Icons.meeting_room), label: '会议'),
