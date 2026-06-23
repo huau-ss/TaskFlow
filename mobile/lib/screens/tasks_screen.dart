@@ -15,8 +15,6 @@ class TasksScreen extends StatefulWidget {
 }
 
 class TasksScreenState extends State<TasksScreen> with SingleTickerProviderStateMixin {
-
-class _TasksScreenState extends State<TasksScreen> with SingleTickerProviderStateMixin {
   late TabController _tabController;
   List<dynamic> _tasks = [];
   bool _loading = true;
