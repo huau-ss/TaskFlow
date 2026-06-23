@@ -385,7 +385,9 @@ class _MessageDetailSheetState extends State<_MessageDetailSheet> {
   @override
   Widget build(BuildContext context) {
     final type = widget.message['type'] as String? ?? 'unknown';
+    final isCreated = type == 'task_created';
     final isReminder = type == 'task_reminder';
+    final hasActions = isCreated || isReminder;
 
     return Container(
       decoration: const BoxDecoration(
@@ -431,7 +433,7 @@ class _MessageDetailSheetState extends State<_MessageDetailSheet> {
                 height: 1.6,
               ),
             ),
-            if (!isReminder) ...[
+            if (hasActions) ...[
               const SizedBox(height: 24),
               const Text(
                 '操作',
@@ -442,89 +444,25 @@ class _MessageDetailSheetState extends State<_MessageDetailSheet> {
                 ),
               ),
               const SizedBox(height: 12),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  _buildActionButton('接受', 'accept', const Color(0xFF2DE0A5)),
-                  _buildActionButton('拒绝', 'reject', const Color(0xFFF5455C)),
-                ],
-              ),
-              if (_selectedAction == 'reject') ...[
-                const SizedBox(height: 16),
-                TextField(
-                  controller: _reasonController,
-                  maxLines: 3,
-                  decoration: InputDecoration(
-                    hintText: '请输入理由',
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: const BorderSide(color: Color(0xFFE5E6EB)),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: const BorderSide(color: Color(0xFFE5E6EB)),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: const BorderSide(color: Color(0xFF1D74F5)),
-                    ),
-                  ),
-                ),
-              ],
-              if (_selectedAction != null) ...[
-                const SizedBox(height: 20),
-                Row(
+              if (isCreated)
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
                   children: [
-                    Expanded(
-                      child: TextButton(
-                        onPressed: () => Navigator.pop(context),
-                        child: const Text('取消'),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: FilledButton(
-                        onPressed: _loading ? null : _submitAction,
-                        style: FilledButton.styleFrom(
-                          backgroundColor: _getActionColor(_selectedAction!),
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                        ),
-                        child: _loading
-                            ? const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
-                              )
-                            : const Text('确认'),
-                      ),
-                    ),
+                    _buildActionButton('接受', 'accept', const Color(0xFF2DE0A5)),
+                    _buildActionButton('拒绝', 'reject', const Color(0xFFF5455C)),
+                  ],
+                )
+              else if (isReminder)
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _buildActionButton('完成', 'complete', const Color(0xFF1D74F5)),
+                    _buildActionButton('未完成', 'incomplete', const Color(0xFFB8860B)),
                   ],
                 ),
-              ],
-            ] else ...[
-              const SizedBox(height: 24),
-              const Text(
-                '操作',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFF1F2329),
-                ),
-              ),
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  _buildActionButton('完成', 'complete', const Color(0xFF1D74F5)),
-                  _buildActionButton('未完成', 'incomplete', const Color(0xFFB8860B)),
-                ],
-              ),
-              if (_selectedAction == 'incomplete') ...[
+              if (_selectedAction == 'reject' || _selectedAction == 'incomplete') ...[
                 const SizedBox(height: 16),
                 TextField(
                   controller: _reasonController,

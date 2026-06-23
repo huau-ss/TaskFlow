@@ -37,6 +37,14 @@ class _HomeScreenState extends State<HomeScreen> {
 
   bool get _showVoicePrintTab => widget.api.isAdmin;
 
+  /// 将底部导航栏 tab 索引映射为 IndexedStack 页面索引。
+  /// 管理员有 6 个 tab，非管理员只有 5 个（跳过声纹）。
+  int _toPageIndex(int tabIndex) {
+    if (_showVoicePrintTab) return tabIndex;
+    // 非管理员：tab 2→页面 3(任务), tab 3→页面 4(消息), tab 4→页面 5(我的)
+    return tabIndex < 2 ? tabIndex : tabIndex + 1;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -98,7 +106,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
       body: IndexedStack(
-        index: _tabIndex,
+        index: _toPageIndex(_tabIndex),
         children: [
           _buildMeetingsList(),
           UploadQueueScreen(uploadQueue: widget.uploadQueue),
@@ -113,13 +121,12 @@ class _HomeScreenState extends State<HomeScreen> {
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tabIndex,
         onDestinationSelected: (i) {
-          if (!_showVoicePrintTab && i == 2) return;
           setState(() {
             _tabIndex = i;
-            if (i == 2) _voicePrintVisited = true;
+            if (_toPageIndex(i) == 2) _voicePrintVisited = true;
           });
           _loadPendingUploads();
-          if (i == 4) _loadUnreadCount();
+          if (_toPageIndex(i) == 4) _loadUnreadCount();  // 消息页面
         },
         destinations: [
           const NavigationDestination(icon: Icon(Icons.meeting_room), label: '会议'),
