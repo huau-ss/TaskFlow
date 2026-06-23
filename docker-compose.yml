@@ -37,7 +37,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://taskflow:taskflow@postgres:5432/taskflow
       DATABASE_URL_SYNC: postgresql://taskflow:taskflow@postgres:5432/taskflow
       REDIS_URL: redis://redis:6379/0
-      NAS_PATH: /mnt/nas/meetings
+      NAS_PATH: /home/admin/nas/meetings/audios
     volumes:
       - ./backend:/app
       - nas_data:/mnt/nas/meetings
@@ -60,7 +60,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://taskflow:taskflow@postgres:5432/taskflow
       DATABASE_URL_SYNC: postgresql://taskflow:taskflow@postgres:5432/taskflow
       REDIS_URL: redis://redis:6379/0
-      NAS_PATH: /mnt/nas/meetings
+      NAS_PATH: /home/admin/nas/meetings/audios
       FUNASR_URL: http://funasr:8005
     volumes:
       - ./backend:/app
