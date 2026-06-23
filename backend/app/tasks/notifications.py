@@ -8,7 +8,7 @@ from sqlalchemy import select
 from app.agents.escalation import auto_escalate_overdue_tasks, escalate_task_to_top
 from app.config import settings
 from app.database import async_session as async_session_maker
-from app.models import Task, TaskStatus
+from app.models import Message, MessageType, Task, TaskStatus
 from app.services.message import create_reminder_message
 
 
@@ -41,6 +41,16 @@ async def _check_deadline_reminders():
         sent_count = 0
         for task in tasks:
             if task.executor_id:
+                # 检查是否已发送过该类型提醒，避免重复
+                existing = await db.execute(
+                    select(Message).where(
+                        Message.task_id == task.id,
+                        Message.recipient_id == task.executor_id,
+                        Message.type == MessageType.task_reminder,
+                    )
+                )
+                if existing.scalar_one_or_none():
+                    continue
                 try:
                     await create_reminder_message(
                         db=db,
@@ -81,6 +91,16 @@ async def _check_overdue_tasks():
                 # 发送逾期提醒
                 if task.executor_id:
                     try:
+                        # 检查是否已发送过逾期提醒
+                        existing = await db.execute(
+                            select(Message).where(
+                                Message.task_id == task.id,
+                                Message.recipient_id == task.executor_id,
+                                Message.type == MessageType.task_reminder,
+                            )
+                        )
+                        if existing.scalar_one_or_none():
+                            continue
                         await create_reminder_message(
                             db=db,
                             task=task,

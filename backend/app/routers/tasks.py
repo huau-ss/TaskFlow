@@ -113,8 +113,9 @@ async def reply_to_task(
     task_id: int,
     body: TaskReplyRequest,
     db: AsyncSession = Depends(get_db),
+    current_user: Employee = Depends(get_current_user),
 ):
-    """任务操作回复（通过 action_token 或已认证用户）
+    """任务操作回复
 
     支持的操作：
     - accept: 接受任务
@@ -135,7 +136,7 @@ async def reply_to_task(
 
     # 更新任务状态
     status_mapping = {
-        "accept": TaskStatus.accepted,
+        "accept": TaskStatus.in_progress,
         "reject": TaskStatus.rejected,
         "complete": TaskStatus.completed,
         "incomplete": TaskStatus.incomplete,
@@ -143,8 +144,7 @@ async def reply_to_task(
     task.status = status_mapping[action]
     await db.flush()
 
-    # 记录操作
-    # 找到相关的消息记录
+    # 记录操作到消息
     msg_query = select(Message).where(Message.task_id == task_id, Message.action_token.isnot(None))
     msg_result = await db.execute(msg_query)
     message = msg_result.scalar_one_or_none()
@@ -154,11 +154,12 @@ async def reply_to_task(
             db, message.id, action, body.reason
         )
 
-    # 创建回复通知给任务创建者（如果有）
-    if task.meeting_id and task.executor_id:
-        creator_query = select(Employee).where(Employee.id == task.executor_id)
-        creator_result = await db.execute(creator_query)
-        executor = creator_result.scalar_one_or_none()
+    # 通知任务执行人的上级：员工接受了/拒绝了/完成了/未完成任务
+    if task.executor_id:
+        executor_result = await db.execute(
+            select(Employee).where(Employee.id == task.executor_id)
+        )
+        executor = executor_result.scalar_one_or_none()
 
         if executor and executor.manager_id:
             await message_service.create_response_message(
@@ -202,7 +203,7 @@ async def reply_to_task_by_token(
         raise HTTPException(status_code=400, detail=f"Reason required for action: {action}")
 
     status_mapping = {
-        "accept": TaskStatus.accepted,
+        "accept": TaskStatus.in_progress,
         "reject": TaskStatus.rejected,
         "complete": TaskStatus.completed,
         "incomplete": TaskStatus.incomplete,
@@ -210,6 +211,18 @@ async def reply_to_task_by_token(
     task.status = status_mapping[action]
 
     await message_service.record_message_action(db, message.id, action, body.reason)
+
+    # 通知任务执行人的上级
+    if task.executor_id:
+        executor_result = await db.execute(
+            select(Employee).where(Employee.id == task.executor_id)
+        )
+        executor = executor_result.scalar_one_or_none()
+
+        if executor and executor.manager_id:
+            await message_service.create_response_message(
+                db, task, executor.manager_id, action, executor.name or "未知"
+            )
 
     await db.commit()
     await db.refresh(task)

@@ -209,7 +209,7 @@ async def create_response_message(
 ) -> Message:
     """创建任务回复通知消息（如员工接受了任务，通知创建者）"""
     action_text = {
-        "accepted": "接受了",
+        "accept": "接受了",
         "rejected": "拒绝了",
         "completed": "完成了",
         "incomplete": "标记未完成",

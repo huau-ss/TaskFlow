@@ -24,6 +24,7 @@ class _TasksScreenState extends State<TasksScreen> with SingleTickerProviderStat
     _StatusTab('待处理', 'pending'),
     _StatusTab('进行中', 'in_progress'),
     _StatusTab('已完成', 'completed'),
+    _StatusTab('已逾期', 'overdue'),
   ];
 
   @override
@@ -349,18 +350,33 @@ class _TasksScreenState extends State<TasksScreen> with SingleTickerProviderStat
                       ),
                     ],
                   ),
-                ] else if (status == 'accepted' || status == 'in_progress') ...[
+                ] else if (status == 'in_progress' || status == 'overdue') ...[
                   const SizedBox(height: 12),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton(
-                      onPressed: () => _replyToTask(task['id'] as int, 'complete'),
-                      style: FilledButton.styleFrom(
-                        backgroundColor: const Color(0xFF1D74F5),
-                        padding: const EdgeInsets.symmetric(vertical: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () => _showIncompleteDialog(task),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: const Color(0xFFB8860B),
+                            side: const BorderSide(color: Color(0xFFB8860B)),
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                          ),
+                          child: const Text('未完成'),
+                        ),
                       ),
-                      child: const Text('完成'),
-                    ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: FilledButton(
+                          onPressed: () => _replyToTask(task['id'] as int, 'complete'),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFF1D74F5),
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                          ),
+                          child: const Text('完成'),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ],
@@ -399,13 +415,18 @@ class _TasksScreenState extends State<TasksScreen> with SingleTickerProviderStat
       builder: (context) => _TaskDetailSheet(
         task: task,
         onRefresh: _loadTasks,
+        onReply: (action, reason) => _replyToTask(task['id'] as int, action, reason: reason),
       ),
     );
   }
 
-  Future<void> _replyToTask(int taskId, String action) async {
+  Future<void> _replyToTask(int taskId, String action, {String? reason}) async {
     try {
-      await widget.api.replyToTask(taskId: taskId, action: action);
+      await widget.api.replyToTask(
+        taskId: taskId,
+        action: action,
+        reason: reason,
+      );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('操作成功')),
@@ -420,6 +441,41 @@ class _TasksScreenState extends State<TasksScreen> with SingleTickerProviderStat
       }
     }
   }
+
+  Future<void> _showIncompleteDialog(Map<String, dynamic> task) async {
+    final reasonController = TextEditingController();
+    final reason = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('填写未完成原因'),
+        content: TextField(
+          controller: reasonController,
+          maxLines: 3,
+          decoration: const InputDecoration(
+            hintText: '请输入未完成的原因',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final text = reasonController.text.trim();
+              if (text.isEmpty) return;
+              Navigator.pop(context, text);
+            },
+            child: const Text('提交'),
+          ),
+        ],
+      ),
+    );
+    if (reason != null) {
+      await _replyToTask(task['id'] as int, 'incomplete', reason: reason);
+    }
+  }
 }
 
 class _StatusTab {
@@ -429,94 +485,279 @@ class _StatusTab {
   _StatusTab(this.label, this.status);
 }
 
-class _TaskDetailSheet extends StatelessWidget {
+class _TaskDetailSheet extends StatefulWidget {
   final Map<String, dynamic> task;
   final VoidCallback onRefresh;
+  final Future<void> Function(String action, String? reason) onReply;
 
   const _TaskDetailSheet({
     required this.task,
     required this.onRefresh,
+    required this.onReply,
   });
 
   @override
+  State<_TaskDetailSheet> createState() => _TaskDetailSheetState();
+}
+
+class _TaskDetailSheetState extends State<_TaskDetailSheet> {
+  String? _selectedAction;
+  bool _loading = false;
+  final _reasonController = TextEditingController();
+
+  @override
+  void dispose() {
+    _reasonController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final status = widget.task['status'] as String? ?? 'unknown';
+    final isPending = status == 'pending';
+    final isActionable = status == 'in_progress' || status == 'overdue';
+
     return Container(
       decoration: const BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Center(
-            child: Container(
-              width: 40,
-              height: 4,
-              decoration: BoxDecoration(
-                color: Colors.grey[300],
-                borderRadius: BorderRadius.circular(2),
+      padding: EdgeInsets.only(
+        left: 20,
+        right: 20,
+        top: 24,
+        bottom: MediaQuery.of(context).viewInsets.bottom + 32,
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey[300],
+                  borderRadius: BorderRadius.circular(2),
+                ),
               ),
             ),
-          ),
-          const SizedBox(height: 20),
-          Text(
-            task['title'] as String? ?? '任务详情',
-            style: const TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.w700,
-              color: Color(0xFF1F2329),
-            ),
-          ),
-          const SizedBox(height: 16),
-          if (task['description'] != null) ...[
+            const SizedBox(height: 20),
             Text(
-              task['description'] as String,
+              widget.task['title'] as String? ?? '任务详情',
               style: const TextStyle(
-                fontSize: 14,
-                color: Color(0xFF8F959E),
-                height: 1.6,
+                fontSize: 18,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF1F2329),
               ),
             ),
             const SizedBox(height: 16),
-          ],
-          _buildInfoRow(
-            Icons.person,
-            '执行人',
-            task['executor_name'] as String? ?? '未分配',
-          ),
-          const SizedBox(height: 12),
-          _buildInfoRow(
-            Icons.meeting_room,
-            '来源会议',
-            task['meeting_title'] as String? ?? '未知',
-          ),
-          const SizedBox(height: 12),
-          _buildInfoRow(
-            Icons.flag,
-            '状态',
-            task['status'] as String? ?? '未知',
-          ),
-          if (task['deadline'] != null) ...[
+            if (widget.task['description'] != null) ...[
+              Text(
+                widget.task['description'] as String,
+                style: const TextStyle(
+                  fontSize: 14,
+                  color: Color(0xFF8F959E),
+                  height: 1.6,
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
+            _buildInfoRow(
+              Icons.person,
+              '执行人',
+              widget.task['executor_name'] as String? ?? '未分配',
+            ),
             const SizedBox(height: 12),
             _buildInfoRow(
-              Icons.schedule,
-              '截止时间',
-              _formatDeadline(task['deadline'] as String),
+              Icons.meeting_room,
+              '来源会议',
+              widget.task['meeting_title'] as String? ?? '未知',
             ),
+            const SizedBox(height: 12),
+            _buildInfoRow(
+              Icons.flag,
+              '状态',
+              _getStatusLabel(status),
+            ),
+            if (widget.task['deadline'] != null) ...[
+              const SizedBox(height: 12),
+              _buildInfoRow(
+                Icons.schedule,
+                '截止时间',
+                _formatDeadline(widget.task['deadline'] as String),
+              ),
+            ],
+            if (isPending) ...[
+              const SizedBox(height: 24),
+              _buildActionButtons([
+                _ActionOption('接受', 'accept', const Color(0xFF2DE0A5)),
+                _ActionOption('拒绝', 'reject', const Color(0xFFF5455C)),
+              ]),
+            ] else if (isActionable) ...[
+              const SizedBox(height: 24),
+              _buildActionButtons([
+                _ActionOption('完成', 'complete', const Color(0xFF1D74F5)),
+                _ActionOption('未完成', 'incomplete', const Color(0xFFB8860B)),
+              ]),
+            ],
+            if (_selectedAction == 'reject' || _selectedAction == 'incomplete') ...[
+              const SizedBox(height: 12),
+              TextField(
+                controller: _reasonController,
+                maxLines: 3,
+                decoration: InputDecoration(
+                  hintText: '请输入理由',
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: Color(0xFFE5E6EB)),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: Color(0xFFE5E6EB)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: Color(0xFF1D74F5)),
+                  ),
+                ),
+              ),
+            ],
+            if (_selectedAction != null) ...[
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: const Text('取消'),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: _loading ? null : _submitAction,
+                      style: FilledButton.styleFrom(
+                        backgroundColor: _getActionColor(_selectedAction!),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                      ),
+                      child: _loading
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Text('确认'),
+                    ),
+                  ),
+                ],
+              ),
+            ] else ...[
+              const SizedBox(height: 20),
+              SizedBox(
+                width: double.infinity,
+                child: TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('关闭'),
+                ),
+              ),
+            ],
           ],
-          const SizedBox(height: 20),
-          SizedBox(
-            width: double.infinity,
-            child: TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('关闭'),
-            ),
-          ),
-        ],
+        ),
       ),
     );
+  }
+
+  Widget _buildActionButtons(List<_ActionOption> options) {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: options.map((opt) {
+        final isSelected = _selectedAction == opt.action;
+        return InkWell(
+          onTap: () => setState(() => _selectedAction = opt.action),
+          borderRadius: BorderRadius.circular(10),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            decoration: BoxDecoration(
+              color: isSelected ? opt.color : opt.color.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: isSelected ? opt.color : opt.color.withOpacity(0.3),
+                width: 1.5,
+              ),
+            ),
+            child: Text(
+              opt.label,
+              style: TextStyle(
+                color: isSelected ? Colors.white : opt.color,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  Color _getActionColor(String action) {
+    switch (action) {
+      case 'accept':
+        return const Color(0xFF2DE0A5);
+      case 'reject':
+        return const Color(0xFFF5455C);
+      case 'complete':
+        return const Color(0xFF1D74F5);
+      case 'incomplete':
+        return const Color(0xFFB8860B);
+      default:
+        return const Color(0xFF8F959E);
+    }
+  }
+
+  String _getStatusLabel(String? status) {
+    switch (status) {
+      case 'pending':
+        return '待处理';
+      case 'in_progress':
+        return '进行中';
+      case 'completed':
+        return '已完成';
+      case 'rejected':
+        return '已拒绝';
+      case 'overdue':
+        return '已逾期';
+      case 'incomplete':
+        return '未完成';
+      default:
+        return status ?? '未知';
+    }
+  }
+
+  Future<void> _submitAction() async {
+    final reason = (_selectedAction == 'reject' || _selectedAction == 'incomplete')
+        ? _reasonController.text.trim()
+        : null;
+    if ((_selectedAction == 'reject' || _selectedAction == 'incomplete') &&
+        (reason == null || reason.isEmpty)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('请输入理由')),
+      );
+      return;
+    }
+    setState(() => _loading = true);
+    try {
+      await widget.onReply(_selectedAction!, reason);
+      widget.onRefresh();
+      if (mounted) Navigator.pop(context);
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
   }
 
   Widget _buildInfoRow(IconData icon, String label, String value) {
@@ -553,4 +794,12 @@ class _TaskDetailSheet extends StatelessWidget {
       return deadline;
     }
   }
+}
+
+class _ActionOption {
+  final String label;
+  final String action;
+  final Color color;
+
+  _ActionOption(this.label, this.action, this.color);
 }
