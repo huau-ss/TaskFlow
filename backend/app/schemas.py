@@ -255,3 +255,30 @@ class TaskDetailResponse(TaskResponse):
 class TaskListResponse(BaseModel):
     tasks: list[TaskDetailResponse]
     total: int
+
+
+# ==================== MeetingRelation / 会议关联 ====================
+
+class MeetingRelationResponse(BaseModel):
+    id: int
+    meeting_a_id: int
+    meeting_b_id: int
+    relation_type: str  # follow_up / related / prerequisite
+    confidence: float
+    reason: str | None
+    created_at: datetime
+
+    # 附加信息（JOIN 出来的会议信息，非必须）
+    meeting_a_title: str | None = None
+    meeting_b_title: str | None = None
+    meeting_a_created_at: datetime | None = None
+    meeting_b_created_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class MeetingRelationAnalyzeResponse(BaseModel):
+    analyzed_count: int  # 分析的会议数量
+    new_relations: int   # 新增关联数
+    updated_relations: int  # 更新关联数
+    relations: list[MeetingRelationResponse]

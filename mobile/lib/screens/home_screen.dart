@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../services/api_service.dart';
 import '../services/upload_queue.dart';
 import 'meeting_detail_screen.dart';
+import 'meeting_graph_screen.dart';
 import 'record_screen.dart';
 import 'upload_queue_screen.dart';
 import 'voice_print_management_screen.dart';
@@ -72,6 +73,18 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         title: const Text('TaskFlow'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.hub),
+            tooltip: '会议关联图谱',
+            onPressed: () async {
+              await Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => MeetingGraphScreen(api: widget.api),
+                ),
+              );
+              _loadMeetings();
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: _loadMeetings,

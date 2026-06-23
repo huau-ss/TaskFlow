@@ -42,6 +42,12 @@ class MeetingStatus(str, enum.Enum):
     failed = "failed"
 
 
+class RelationType(str, enum.Enum):
+    follow_up = "follow_up"  # 后续会议（同一议题的延续）
+    related = "related"       # 相关会议（同项目/同客户）
+    prerequisite = "prerequisite"  # 前置会议（需先完成前者）
+
+
 class Employee(Base):
     __tablename__ = "employees"
 
@@ -84,6 +90,14 @@ class Meeting(Base):
         "TranscriptSegment", back_populates="meeting", cascade="all, delete-orphan"
     )
     tasks: Mapped[list["Task"]] = relationship("Task", back_populates="meeting")
+    # 关联到我作为 A 方的会议关系
+    relations_as_a: Mapped[list["MeetingRelation"]] = relationship(
+        "MeetingRelation", foreign_keys="MeetingRelation.meeting_a_id", back_populates="meeting_a"
+    )
+    # 关联到我作为 B 方的会议关系
+    relations_as_b: Mapped[list["MeetingRelation"]] = relationship(
+        "MeetingRelation", foreign_keys="MeetingRelation.meeting_b_id", back_populates="meeting_b"
+    )
 
 
 class TranscriptSegment(Base):
@@ -219,3 +233,32 @@ class MessageAction(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     message: Mapped["Message"] = relationship("Message", back_populates="actions")
+
+
+class MeetingRelation(Base):
+    """
+    会议关联关系表。
+    - meeting_a → meeting_b 表示 A 和 B 有关联。
+    - direction 由 relation_type 决定语义：
+        - follow_up: A 是前序，B 是后续
+        - related:  A 和 B 同属一个项目/客户，无方向
+        - prerequisite: A 是前置，B 依赖 A 的结果
+    """
+    __tablename__ = "meeting_relations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    meeting_a_id: Mapped[int] = mapped_column(ForeignKey("meetings.id"), nullable=False, index=True)
+    meeting_b_id: Mapped[int] = mapped_column(ForeignKey("meetings.id"), nullable=False, index=True)
+    relation_type: Mapped[RelationType] = mapped_column(
+        Enum(RelationType, name="relation_type"), nullable=False
+    )
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)  # 0.0–1.0
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)  # LLM 给出的关联理由
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    meeting_a: Mapped["Meeting"] = relationship(
+        "Meeting", foreign_keys=[meeting_a_id], back_populates="relations_as_a"
+    )
+    meeting_b: Mapped["Meeting"] = relationship(
+        "Meeting", foreign_keys=[meeting_b_id], back_populates="relations_as_b"
+    )

@@ -294,4 +294,31 @@ class ApiService {
     final resp = await _dio.get('/employees/$employeeId/subordinates');
     return resp.data as List<dynamic>;
   }
+
+  // ==================== 会议关联 API ====================
+
+  Future<Map<String, dynamic>> analyzeMeetingRelations({List<int>? meetingIds}) async {
+    final resp = await _dio.post(
+      '/meetings/relations/analyze',
+      data: meetingIds != null ? {'meeting_ids': meetingIds} : {},
+    );
+    return resp.data as Map<String, dynamic>;
+  }
+
+  Future<List<dynamic>> listMeetingRelations({int? meetingId}) async {
+    final resp = await _dio.get(
+      '/meetings/relations',
+      queryParameters: meetingId != null ? {'meeting_id': meetingId} : {},
+    );
+    return resp.data as List<dynamic>;
+  }
+
+  Future<void> deleteMeetingRelation(int relationId) async {
+    await _dio.delete('/meetings/relations/$relationId');
+  }
+
+  Future<Map<String, dynamic>> getMeetingGraph() async {
+    final resp = await _dio.get('/meetings/graph');
+    return resp.data as Map<String, dynamic>;
+  }
 }
