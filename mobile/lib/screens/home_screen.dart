@@ -34,6 +34,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _hasPendingUploads = false;
   bool _voicePrintVisited = false;
   int _unreadMessageCount = 0;
+  final _tasksKey = GlobalKey<TasksScreenState>();
 
   bool get _showVoicePrintTab => widget.api.isAdmin;
 
@@ -113,7 +114,7 @@ class _HomeScreenState extends State<HomeScreen> {
           _showVoicePrintTab
               ? (_voicePrintVisited ? VoicePrintManagementScreen(api: widget.api) : const SizedBox.shrink())
               : const _NonAdminPlaceholder(),
-          TasksScreen(api: widget.api),
+          TasksScreen(key: _tasksKey, api: widget.api),
           MessagesScreen(api: widget.api),
           MeScreen(api: widget.api),
         ],
@@ -126,6 +127,7 @@ class _HomeScreenState extends State<HomeScreen> {
             if (_toPageIndex(i) == 2) _voicePrintVisited = true;
           });
           _loadPendingUploads();
+          if (_toPageIndex(i) == 3) _tasksKey.currentState?.refresh();  // 任务页面
           if (_toPageIndex(i) == 4) _loadUnreadCount();  // 消息页面
         },
         destinations: [

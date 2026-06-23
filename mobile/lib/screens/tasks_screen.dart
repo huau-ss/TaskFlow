@@ -11,8 +11,10 @@ class TasksScreen extends StatefulWidget {
   final ApiService api;
 
   @override
-  State<TasksScreen> createState() => _TasksScreenState();
+  State<TasksScreen> createState() => TasksScreenState();
 }
+
+class TasksScreenState extends State<TasksScreen> with SingleTickerProviderStateMixin {
 
 class _TasksScreenState extends State<TasksScreen> with SingleTickerProviderStateMixin {
   late TabController _tabController;
@@ -40,6 +42,9 @@ class _TasksScreenState extends State<TasksScreen> with SingleTickerProviderStat
     _tabController.dispose();
     super.dispose();
   }
+
+  /// 供外部调用，刷新任务列表（如从消息页接受任务后切回）
+  void refresh() => _loadTasks();
 
   void _onTabChanged() {
     if (!_tabController.indexIsChanging) {
