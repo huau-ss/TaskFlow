@@ -6,6 +6,10 @@ Voiceprint fusion — 声纹识别结果融合：
    让 LLM 可以直接利用已识别的人员信息
 2. 多段落声纹投票：如果任务跨多个 segment，用多数表决确定执行人
 3. 记录匹配方式和置信度到 Task 模型，便于追溯和审计
+
+两种入口：
+- run_task_extraction(): async 入口（供 FastAPI 路由调用）
+- run_task_extraction_sync(): sync 入口（供 Celery worker 直接调用，无 asyncio.run 开销）
 """
 
 import json
@@ -20,6 +24,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import Employee, Meeting, Task, TaskStatus, TranscriptSegment
@@ -433,3 +438,216 @@ async def run_task_extraction(db: AsyncSession, meeting: Meeting) -> list[Task]:
         select(Task).where(Task.id.in_(created_ids)).order_by(Task.id)
     )
     return list(result.scalars().all())
+
+
+# ── 同步入口（供 Celery worker 直接调用）─────────────────────────────
+
+def run_task_extraction_sync(db: Session, meeting_id: int) -> tuple[list[int], list[str]]:
+    """
+    同步版任务提取 + 通知，直接使用传入的 sync Session，无 asyncio.run() 开销。
+
+    Returns:
+        (created_task_ids, errors)
+    """
+    from app.agents.task_notification import send_task_notifications_sync
+
+    # 加载员工
+    employees = db.execute(
+        select(Employee).where(Employee.is_active.is_(True))
+    ).scalars().all()
+    emp_id_to_name = {e.id: e.name for e in employees}
+
+    # 加载转写片段
+    segments = db.execute(
+        select(TranscriptSegment).where(TranscriptSegment.meeting_id == meeting_id)
+    ).scalars().all()
+
+    if not segments:
+        return [], []
+
+    # 构建 speaker → employee 声纹映射
+    speaker_employee_votes: dict[str, list[int]] = {}
+    for seg in segments:
+        if seg.employee_id:
+            speaker_employee_votes.setdefault(seg.speaker_label, []).append(seg.employee_id)
+
+    speaker_employee_map: dict[str, dict] = {}
+    for label, emp_ids in speaker_employee_votes.items():
+        counter = Counter(emp_ids)
+        most_common_id, count = counter.most_common(1)[0]
+        emp_name = emp_id_to_name.get(most_common_id)
+        if emp_name:
+            speaker_employee_map[label] = {
+                "id": most_common_id,
+                "name": emp_name,
+                "confidence": round(count / len(emp_ids), 2),
+            }
+
+    transcript_text, seg_data = _format_transcript(segments, speaker_employee_map)
+    if not transcript_text.strip():
+        return [], []
+
+    # LLM 提取（async，但 Celery worker 本来就在事件循环中）
+    import asyncio
+    errors: list[str] = []
+
+    async def _run():
+        result = await _extract_tasks_async(
+            transcript_text=transcript_text,
+            seg_data=seg_data,
+            employees=[
+                {"id": e.id, "name": e.name, "email": e.email} for e in employees
+            ],
+            speaker_employee_map=speaker_employee_map,
+        )
+        return result
+
+    matched_tasks = asyncio.run(_run())
+
+    # 持久化任务
+    created_ids: list[int] = []
+    created_tasks: list[Task] = []
+    for item in matched_tasks:
+        task = Task(
+            title=item["title"],
+            description=item.get("description"),
+            deadline=item.get("deadline"),
+            status=TaskStatus.pending,
+            executor_id=item.get("executor_id"),
+            meeting_id=meeting_id,
+            source_segment_ids=item.get("source_segment_ids"),
+            match_method=item.get("match_method"),
+            match_confidence=item.get("match_confidence"),
+        )
+        db.add(task)
+        db.flush()
+        created_ids.append(task.id)
+        created_tasks.append(task)
+
+    # 发送通知（sync）
+    try:
+        send_task_notifications_sync(db, created_tasks)
+    except Exception as e:
+        errors.append(f"通知发送失败: {e}")
+
+    return created_ids, errors
+
+
+async def _extract_tasks_async(
+    transcript_text: str,
+    seg_data: list[dict],
+    employees: list[dict],
+    speaker_employee_map: dict[str, dict],
+) -> list[dict]:
+    """async 核心提取逻辑，供 sync 入口调用"""
+    llm = _build_llm()
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+
+    voiceprint_hint = ""
+    if speaker_employee_map:
+        resolved = [
+            f"{label} → {info['name']}（声纹置信度 {info['confidence']:.0%}）"
+            for label, info in speaker_employee_map.items()
+        ]
+        voiceprint_hint = (
+            "\n\n【声纹识别结果】以下说话人已通过声纹验证：\n" + "\n".join(resolved)
+        )
+
+    prompt = f"今天是 {today}。\n\n会议转写：\n{transcript_text}{voiceprint_hint}"
+    response = await llm.ainvoke(
+        [SystemMessage(content=EXTRACT_SYSTEM), HumanMessage(content=prompt)]
+    )
+    content = response.content.strip()
+    if content.startswith("```"):
+        content = re.sub(r"^```(?:json)?\n?", "", content)
+        content = re.sub(r"\n?```$", "", content)
+
+    try:
+        extracted = json.loads(content)
+        if not isinstance(extracted, list):
+            return []
+    except json.JSONDecodeError:
+        return []
+
+    # 执行人匹配（复用已有逻辑）
+    return _match_and_enrich(extracted, seg_data, employees, speaker_employee_map)
+
+
+def _match_and_enrich(
+    extracted: list[dict],
+    seg_data: list[dict],
+    employees: list[dict],
+    speaker_employee_map: dict[str, dict],
+) -> list[dict]:
+    """同步执行人匹配逻辑（复用自 async 版本）"""
+    employee_names = {emp["name"]: emp["id"] for emp in employees}
+    employee_names_lower = {n.lower(): eid for n, eid in employee_names.items()}
+    seg_emp_map: dict[int, tuple[int, float]] = {
+        s["id"]: (s["employee_id"], speaker_employee_map.get(s.get("raw_speaker", "") or "", {}).get("confidence", 0.5))
+        for s in seg_data if s.get("employee_id")
+    }
+
+    matched = []
+    for item in extracted:
+        executor_id = None
+        match_method = None
+        match_confidence = None
+        source_ids = item.get("source_segment_ids", [])
+        if not isinstance(source_ids, list):
+            source_ids = []
+
+        # 声纹投票
+        if source_ids and seg_emp_map:
+            votes: dict[int, tuple[int, float]] = {}
+            for sid in source_ids:
+                if sid in seg_emp_map:
+                    eid, conf = seg_emp_map[sid]
+                    if eid in votes:
+                        c, t = votes[eid]
+                        votes[eid] = (c + 1, t + conf)
+                    else:
+                        votes[eid] = (1, conf)
+
+            best_emp, best_score = None, -1.0
+            for eid, (count, total_conf) in votes.items():
+                avg_conf = total_conf / count
+                score = count + avg_conf
+                if score > best_score:
+                    best_score = score
+                    best_emp = eid
+                    match_confidence = round(avg_conf, 2)
+
+            if best_emp:
+                executor_id = best_emp
+                match_method = "voiceprint"
+
+        # 姓名匹配
+        if not executor_id:
+            name = (item.get("executor_name") or "").strip()
+            if name in employee_names:
+                executor_id = employee_names[name]
+                match_method = "name_exact"
+                match_confidence = 1.0
+            elif name.lower() in employee_names_lower:
+                executor_id = employee_names_lower[name.lower()]
+                match_method = "name_exact"
+                match_confidence = 1.0
+            else:
+                for emp_name, emp_id in employee_names.items():
+                    if name in emp_name:
+                        executor_id = emp_id
+                        match_method = "name_fuzzy"
+                        match_confidence = 0.6
+                        break
+
+        matched.append({
+            "title": item.get("task") or "未命名任务",
+            "description": item.get("description"),
+            "executor_id": executor_id,
+            "match_method": match_method,
+            "match_confidence": match_confidence,
+            "deadline": _parse_deadline(item.get("deadline_text")),
+            "source_segment_ids": json.dumps(source_ids) if source_ids else None,
+        })
+
+    return matched

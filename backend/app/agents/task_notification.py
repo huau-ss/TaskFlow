@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
 from app.models import Task, Employee, TranscriptSegment, TaskStatus, MessageType
 from app.services.message import create_task_notification, create_response_message
@@ -168,3 +169,58 @@ async def notify_task_status_change(
             await db.rollback()
 
     return False
+
+
+# ── 同步入口（供 Celery worker 直接调用）─────────────────────────────
+
+def send_task_notifications_sync(db: Session, tasks: list[Task]) -> int:
+    """同步版通知发送，无 async/await 依赖"""
+    message_count = 0
+    for task in tasks:
+        if not task.executor_id:
+            continue
+        executor = db.get(Employee, task.executor_id)
+        if not executor:
+            continue
+        content = _build_notification_content(task)
+        try:
+            create_message_sync(
+                db=db,
+                msg_type=MessageType.task_created,
+                title=f"📋 新任务：{task.title}",
+                content=content,
+                recipient_id=executor.id,
+                task_id=task.id,
+            )
+            message_count += 1
+        except Exception:
+            pass
+    return message_count
+
+
+def create_message_sync(
+    db: Session,
+    *,
+    msg_type: MessageType,
+    title: str,
+    recipient_id: int,
+    content: str | None = None,
+    task_id: int | None = None,
+    sender_id: int | None = None,
+) -> None:
+    """同步版消息创建（不依赖 async）"""
+    import secrets
+    token = secrets.token_urlsafe(32)
+    from app.models import Message
+    msg = Message(
+        type=msg_type,
+        title=title,
+        content=content,
+        recipient_id=recipient_id,
+        task_id=task_id,
+        sender_id=sender_id,
+        action_token=token,
+        action_url=f"/tasks/{task_id}/reply?token={token}" if task_id else None,
+    )
+    db.add(msg)
+    db.flush()

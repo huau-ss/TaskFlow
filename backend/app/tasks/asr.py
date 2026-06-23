@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 import re
@@ -768,41 +767,23 @@ def run_transcribe_meeting(meeting_id: int) -> dict:
         db.commit()
     # ── sync session closed here ──
 
-    # ── Phase 2: 任务提取 + 通知（async session，完全独立）──
+    # ── Phase 2: 任务提取 + 通知（sync，无 asyncio.run 开销）──
     tasks_created = 0
     notifications_sent = 0
+    errors: list[str] = []
     try:
-        from app.agents.task_extract import run_task_extraction
-        from app.agents.task_notification import send_task_notifications
+        from app.agents.task_extract import run_task_extraction_sync
+        from app.agents.task_notification import send_task_notifications_sync
 
-        async def _auto_extract_and_notify():
-            from app.database import async_session
-            async with async_session() as adb:
-                try:
-                    from sqlalchemy import select as sa_select
-                    from sqlalchemy.orm import selectinload
-                    result = await adb.execute(
-                        sa_select(Meeting)
-                        .options(selectinload(Meeting.segments))
-                        .where(Meeting.id == meeting_id)
-                    )
-                    fresh_meeting = result.scalar_one_or_none()
-                    if not fresh_meeting or not fresh_meeting.segments:
-                        return 0, 0
+        with SyncSession() as phase2_db:
+            created_ids, errors = run_task_extraction_sync(phase2_db, meeting_id)
+            phase2_db.commit()
+            tasks_created = len(created_ids)
+            notifications_sent = tasks_created  # 每个任务最多发一条通知
 
-                    tasks = await run_task_extraction(adb, fresh_meeting)
-                    await adb.commit()
-
-                    msg_count = await send_task_notifications(adb, tasks)
-                    return len(tasks), msg_count
-                except Exception as e:
-                    logger.warning(f"自动任务提取失败: {e}")
-                    await adb.rollback()
-                    return 0, 0
-
-        tasks_created, notifications_sent = asyncio.run(
-            _auto_extract_and_notify()
-        )
+        if errors:
+            for err in errors:
+                logger.warning(f"会议 {meeting_id} Phase 2 错误: {err}")
         logger.info(
             f"会议 {meeting_id}: 提取 {tasks_created} 个任务, "
             f"发送 {notifications_sent} 条通知"
