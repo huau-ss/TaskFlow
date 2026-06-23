@@ -143,7 +143,7 @@ async def reply_to_task(
         "accept": TaskStatus.in_progress,
         "reject": TaskStatus.rejected,
         "complete": TaskStatus.completed,
-        "incomplete": TaskStatus.incomplete,
+        "incomplete": TaskStatus.overdue,
     }
     task.status = status_mapping[action]
     await db.flush()
@@ -217,7 +217,7 @@ async def reply_to_task_by_token(
         "accept": TaskStatus.in_progress,
         "reject": TaskStatus.rejected,
         "complete": TaskStatus.completed,
-        "incomplete": TaskStatus.incomplete,
+        "incomplete": TaskStatus.overdue,
     }
     task.status = status_mapping[action]
 

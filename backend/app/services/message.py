@@ -213,7 +213,7 @@ async def create_response_message(
         "accept": "接受了",
         "reject": "拒绝了",
         "complete": "完成了",
-        "incomplete": "标记未完成",
+        "incomplete": "标记未完成（已逾期）",
     }.get(action, action)
 
     title = f"📝 任务状态更新：{task.title}"

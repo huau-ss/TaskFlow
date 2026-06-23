@@ -21,7 +21,6 @@ class TasksScreenState extends State<TasksScreen> with SingleTickerProviderState
 
   final List<_StatusTab> _tabs = [
     _StatusTab('全部', null),
-    _StatusTab('待处理', 'pending'),
     _StatusTab('进行中', 'in_progress'),
     _StatusTab('已完成', 'completed'),
     _StatusTab('已逾期', 'overdue'),
@@ -99,7 +98,7 @@ class TasksScreenState extends State<TasksScreen> with SingleTickerProviderState
       case 'overdue':
         return '已逾期';
       case 'incomplete':
-        return '未完成';
+        return '已逾期';
       case 'escalated':
         return '已升级';
       default:
