@@ -9,7 +9,9 @@ FunASR 统一语音服务 — ASR + 说话人分离 + CAM++ 声纹 embedding.
 启动: uvicorn main:app --host 0.0.0.0 --port 8005
 """
 
+import gc
 import logging
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -124,6 +126,21 @@ def _merge_vad_segments(segments: list[dict]) -> list[dict]:
     return merged
 
 
+# ────────── 内存监控 ──────────
+
+def _mem_mb() -> float:
+    """返回当前进程 RSS（MB）"""
+    try:
+        with open(f"/proc/{os.getpid()}/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return float(line.split()[1]) / 1024.0
+    except Exception:
+        return -1.0
+
+def _log_mem(tag: str) -> None:
+    logger.info(f"[MEM] {tag}: rss={_mem_mb():.0f}MB")
+
 # ────────── API ──────────
 
 
@@ -153,6 +170,8 @@ async def transcribe(file: UploadFile = File(...)):
         raise HTTPException(500, "音频格式转换失败")
 
     try:
+        _log_mem("开始转写")
+
         # ── Step 1: VAD ──
         vad_result = _vad.generate(input=wav_path)
         vad_segments: list[dict] = []
@@ -176,6 +195,14 @@ async def transcribe(file: UploadFile = File(...)):
             # 合并相邻段（使用全局质量控制参数）
             vad_segments = _merge_vad_segments(vad_segments)
         logger.info(f"VAD: {len(vad_segments)} 段")
+        _log_mem("VAD 完成")
+
+        # ── VAD 模型用完卸载，释放内存给 ASR/CAM++ ──
+        del vad_result
+        global _vad
+        _vad = None
+        gc.collect()
+        _log_mem("VAD 卸载后")
 
         # ── Step 2: 一次性加载音频，后续切片全部 in-memory，避免 N 次磁盘读取导致 OOM ──
         wav_full, sr = sf.read(wav_path, dtype="float32")
@@ -186,6 +213,7 @@ async def transcribe(file: UploadFile = File(...)):
         segments = []
         embeddings = []
         min_seg_dur = 1.0  # 秒：跳过太短的片段（CAM++ 需要足够语音帧）
+        _log_mem("ASR/CAM++ 循环开始")
 
         for i, seg in enumerate(vad_segments):
             # 跳过过短片段（CAM++ 在 < 1s 语音上不稳定）
@@ -239,6 +267,7 @@ async def transcribe(file: UploadFile = File(...)):
                 Path(slice_path.name).unlink(missing_ok=True)
 
         logger.info(f"ASR+Embedding: {len(segments)} 个有效段（已过滤 < {min_seg_dur}s 片段）")
+        _log_mem("ASR/CAM++ 完成")
 
         # ── Step 3: 说话人聚类 ──────────────────────────────────
         num_speakers = 1
@@ -279,6 +308,7 @@ async def transcribe(file: UploadFile = File(...)):
             s["sequence"] = i
 
         elapsed = time.time() - t0
+        _log_mem(f"转写完成 ({elapsed:.1f}s)")
         logger.info(f"转写完成: {len(segments)} 段, {num_speakers} 说话人, {elapsed:.1f}s")
 
         return {
