@@ -27,7 +27,7 @@ logging.basicConfig(level=logging.INFO)
 
 # ── 聚类质量控制参数 ──────────────────────────────────────
 # 合并相邻 VAD 段的最大间隔（秒）。增大可减少碎片。
-_MERGE_MAX_GAP = 3.0          # 原值 2.0s → 减少小间隙导致的碎片片段
+_MERGE_MAX_GAP = 2.0          # 原值 3.0s → 降低以减少不同说话人被合并
 # 片段合并后最小持续时长（秒），短于此值直接丢弃，不参与 embedding 提取。
 # CAM++ 需要 1.5s+ 语音才能输出稳定向量，0.5s 太短会引入噪声。
 _MERGE_MIN_DURATION = 1.5     # 原值 0.5s
@@ -35,6 +35,12 @@ _MERGE_MIN_DURATION = 1.5     # 原值 0.5s
 _MIN_EMBEDDINGS_FOR_CLUSTERING = 2
 # CAM++ embedding 间的余弦距离上限（用于过滤异常值）。超过此距离认为是噪声。
 _OUTLIER_DISTANCE_THRESHOLD = 0.65  # 保留，仅用于日志记录（已停用）
+
+# ── OOM 防护：限制单次 ASR 调用处理的片段最大时长 ──
+# Paraformer 在 CPU 上处理 30s 音频约需 4-6GB RSS（临时分配），
+# 加上模型权重 ~4GB、音频 ~0.5GB，峰值可控制在 10GB 限制内。
+_MAX_SEGMENT_DURATION = 30.0       # 子片段最大持续时长（秒）
+_SUB_SEGMENT_MIN_DURATION = 1.0    # 子片段最短持续时长（秒，CAM++ 需要足够语音帧）
 
 app = FastAPI(title="FunASR Service", version="2.0")
 
@@ -126,6 +132,43 @@ def _merge_vad_segments(segments: list[dict]) -> list[dict]:
     return merged
 
 
+def _split_long_segments(
+    segments: list[dict],
+    max_dur: float = _MAX_SEGMENT_DURATION,
+) -> tuple[list[dict], int]:
+    """将超过 max_dur 的片段等长切分为子段，防止 CPU ASR 推理 OOM。
+
+    Args:
+        segments: VAD 合并后的片段列表 [{"start": s, "end": s}, ...]
+        max_dur: 子片段最大持续时长（秒）
+
+    Returns:
+        (expanded_segments, split_count):
+            expanded_segments — 切分后的子段列表（原顺序，不超 max_dur）
+            split_count — 被切分的原始片段数量
+    """
+    result: list[dict] = []
+    split_count = 0
+    for seg in segments:
+        dur = seg["end"] - seg["start"]
+        if dur <= max_dur:
+            result.append(seg)
+        else:
+            n = int(np.ceil(dur / max_dur))
+            chunk_dur = dur / n
+            for j in range(n):
+                result.append({
+                    "start": seg["start"] + j * chunk_dur,
+                    "end": seg["start"] + (j + 1) * chunk_dur,
+                })
+            split_count += 1
+            logger.info(
+                f"长片段切分: {seg['start']:.1f}s–{seg['end']:.1f}s "
+                f"({dur:.1f}s → {n}×{chunk_dur:.1f}s)"
+            )
+    return result, split_count
+
+
 # ────────── 内存监控 ──────────
 
 def _mem_mb() -> float:
@@ -210,17 +253,26 @@ async def transcribe(file: UploadFile = File(...)):
         if len(wav_full.shape) > 1:
             wav_full = wav_full.mean(axis=1)
 
+        # ── Step 2.5: 长片段切分（防止 CPU ASR 推理 OOM）──
+        _log_mem("长片段切分前")
+        vad_segments, split_count = _split_long_segments(vad_segments)
+        if split_count:
+            logger.info(
+                f"长片段切分完成: {len(vad_segments)} 段 "
+                f"({split_count} 个原始段被切分, max={_MAX_SEGMENT_DURATION}s)"
+            )
+        _log_mem("长片段切分后")
+
         # ── Step 3: 每段 ASR + CAM++ ──────────────────────────────
         segments = []
         embeddings = []
-        min_seg_dur = 1.0  # 秒：跳过太短的片段（CAM++ 需要足够语音帧）
         _log_mem("ASR/CAM++ 循环开始")
 
         for i, seg in enumerate(vad_segments):
-            # 跳过过短片段（CAM++ 在 < 1s 语音上不稳定）
+            # 跳过过短片段（CAM++ 在 < _SUB_SEGMENT_MIN_DURATION s 语音上不稳定）
             seg_dur = seg["end"] - seg["start"]
-            if seg_dur < min_seg_dur:
-                logger.debug(f"跳过过短片段 {i}: {seg_dur:.2f}s < {min_seg_dur}s")
+            if seg_dur < _SUB_SEGMENT_MIN_DURATION:
+                logger.debug(f"跳过过短片段 {i}: {seg_dur:.2f}s < {_SUB_SEGMENT_MIN_DURATION}s")
                 continue
 
             # in-memory 切片（wav_full 已在 Step 2 一次性加载）
@@ -266,28 +318,67 @@ async def transcribe(file: UploadFile = File(...)):
                     embeddings.append(emb)
             finally:
                 Path(slice_path.name).unlink(missing_ok=True)
+                # 每 5 个子段 GC 一次，释放 ASR 推理中间 tensor
+                if (i + 1) % 5 == 0:
+                    gc.collect()
+                    _log_mem(f"ASR 子段 {i+1}/{len(vad_segments)} gc")
 
-        logger.info(f"ASR+Embedding: {len(segments)} 个有效段（已过滤 < {min_seg_dur}s 片段）")
+        logger.info(f"ASR+Embedding: {len(segments)} 个有效段（已过滤 < {_SUB_SEGMENT_MIN_DURATION}s 片段）")
         _log_mem("ASR/CAM++ 完成")
 
         # ── Step 3: 说话人聚类 ──────────────────────────────────
+        # 使用 Silhouette Score 自动选择最优说话人数（不需硬编码上限）
         num_speakers = 1
         if len(embeddings) >= _MIN_EMBEDDINGS_FOR_CLUSTERING:
             emb_matrix = np.array(embeddings)
-
-            # 启发式确定说话人数量（基于有效 embedding 数量）
             n = len(embeddings)
-            if n >= 7:
-                num_speakers = min(3, n)
-            elif n >= 3:
-                num_speakers = min(2, n)
-            else:
-                num_speakers = 1
+            max_k = min(8, n - 1)  # 最多检测 8 人，不少于 n-1
 
-            clustering = AgglomerativeClustering(
-                n_clusters=num_speakers, metric="cosine", linkage="average"
-            )
-            labels = clustering.fit_predict(emb_matrix)
+            if max_k <= 1:
+                num_speakers = 1
+                labels = np.zeros(n, dtype=int)
+            else:
+                from sklearn.metrics import silhouette_score
+
+                best_k = 1
+                best_score = -1.0
+                best_labels = np.zeros(n, dtype=int)
+
+                # 预计算余弦距离矩阵（AgglomerativeClustering 需要）
+                for k_candidate in range(2, max_k + 1):
+                    clustering = AgglomerativeClustering(
+                        n_clusters=k_candidate, metric="cosine", linkage="average"
+                    )
+                    candidate_labels = clustering.fit_predict(emb_matrix)
+
+                    # Silhouette 需要 ≥2 个簇，每个簇至少 2 个样本
+                    unique_labels = set(candidate_labels)
+                    if len(unique_labels) < 2:
+                        continue
+                    if any(np.sum(candidate_labels == lbl) < 2 for lbl in unique_labels):
+                        continue
+
+                    score = silhouette_score(emb_matrix, candidate_labels, metric="cosine")
+                    if score > best_score:
+                        best_score = score
+                        best_k = k_candidate
+                        best_labels = candidate_labels.copy()
+
+                # 如果最佳分数太低（< 0.05），退回到 1 说话人（聚类无意义）
+                if best_score < 0.05:
+                    num_speakers = 1
+                    labels = np.zeros(n, dtype=int)
+                    logger.info(
+                        f"Silhouette 分数过低 ({best_score:.4f} < 0.05)，"
+                        f"回退为 1 说话人"
+                    )
+                else:
+                    num_speakers = best_k
+                    labels = best_labels
+                    logger.info(
+                        f"Silhouette 自动选 k={best_k} (score={best_score:.4f}, "
+                        f"搜索范围 2–{max_k})"
+                    )
 
             # 回填标签（segments 和 embeddings 严格同步，直接按顺序对应）
             for k, seg in enumerate(segments):
