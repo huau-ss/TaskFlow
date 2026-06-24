@@ -154,7 +154,7 @@ async def reply_to_task(
         Message.recipient_id == current_user.id,
         Message.type == MessageType.task_created,
         Message.action_token.isnot(None),
-    )
+    ).order_by(Message.created_at.desc()).limit(1)
     msg_result = await db.execute(msg_query)
     message = msg_result.scalar_one_or_none()
 
