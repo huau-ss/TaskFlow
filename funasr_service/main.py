@@ -153,6 +153,8 @@ async def transcribe(file: UploadFile = File(...)):
     3. 每个段切片 → paraformer ASR → CAM++ embedding
     4. 说话人聚类
     """
+    global _vad
+
     if not _models_loaded:
         _load_models()
 
@@ -199,7 +201,6 @@ async def transcribe(file: UploadFile = File(...)):
 
         # ── VAD 模型用完卸载，释放内存给 ASR/CAM++ ──
         del vad_result
-        global _vad
         _vad = None
         gc.collect()
         _log_mem("VAD 卸载后")
