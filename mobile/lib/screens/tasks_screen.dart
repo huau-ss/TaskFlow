@@ -21,7 +21,6 @@ class _TasksScreenState extends State<TasksScreen> with SingleTickerProviderStat
 
   final List<_StatusTab> _tabs = [
     _StatusTab('全部', null),
-    _StatusTab('待处理', 'pending'),
     _StatusTab('进行中', 'in_progress'),
     _StatusTab('已完成', 'completed'),
     _StatusTab('已逾期', 'overdue'),
@@ -322,35 +321,7 @@ class _TasksScreenState extends State<TasksScreen> with SingleTickerProviderStat
                     ],
                   ),
                 ],
-                if (status == 'pending') ...[
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: OutlinedButton(
-                          onPressed: () => _replyToTask(task['id'] as int, 'reject'),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: const Color(0xFFF5455C),
-                            side: const BorderSide(color: Color(0xFFF5455C)),
-                            padding: const EdgeInsets.symmetric(vertical: 8),
-                          ),
-                          child: const Text('拒绝'),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: FilledButton(
-                          onPressed: () => _replyToTask(task['id'] as int, 'accept'),
-                          style: FilledButton.styleFrom(
-                            backgroundColor: const Color(0xFF2DE0A5),
-                            padding: const EdgeInsets.symmetric(vertical: 8),
-                          ),
-                          child: const Text('接受'),
-                        ),
-                      ),
-                    ],
-                  ),
-                ] else if (status == 'in_progress' || status == 'overdue') ...[
+                if (status == 'in_progress' || status == 'overdue') ...[
                   const SizedBox(height: 12),
                   Row(
                     children: [
@@ -514,7 +485,6 @@ class _TaskDetailSheetState extends State<_TaskDetailSheet> {
   @override
   Widget build(BuildContext context) {
     final status = widget.task['status'] as String? ?? 'unknown';
-    final isPending = status == 'pending';
     final isActionable = status == 'in_progress' || status == 'overdue';
 
     return Container(
@@ -589,13 +559,7 @@ class _TaskDetailSheetState extends State<_TaskDetailSheet> {
                 _formatDeadline(widget.task['deadline'] as String),
               ),
             ],
-            if (isPending) ...[
-              const SizedBox(height: 24),
-              _buildActionButtons([
-                _ActionOption('接受', 'accept', const Color(0xFF2DE0A5)),
-                _ActionOption('拒绝', 'reject', const Color(0xFFF5455C)),
-              ]),
-            ] else if (isActionable) ...[
+            if (isActionable) ...[
               const SizedBox(height: 24),
               _buildActionButtons([
                 _ActionOption('完成', 'complete', const Color(0xFF1D74F5)),
