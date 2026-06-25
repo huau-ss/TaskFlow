@@ -107,7 +107,7 @@ def _call_funasr_transcribe(audio_path: Path) -> dict:
     一次 HTTP 调用替换旧的 8004(pyannote) + 8002(ASR) + 8003(MFCC) 三步骤。
     """
     funasr_url = getattr(settings, "funasr_url", "http://localhost:8005")
-    with httpx.Client(timeout=600.0) as client:
+    with httpx.Client(timeout=1200.0) as client:
         with open(audio_path, "rb") as f:
             resp = client.post(
                 f"{funasr_url}/api/transcribe",
