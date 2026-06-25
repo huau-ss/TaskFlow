@@ -21,7 +21,7 @@ class LoginScreen extends StatefulWidget {
 class _LoginScreenState extends State<LoginScreen> {
   final _emailCtrl = TextEditingController(text: 'admin@company.com');
   final _passwordCtrl = TextEditingController(text: 'admin123');
-  final _urlCtrl = TextEditingController(text: 'http://192.168.10.8:8000');
+  final _urlCtrl = TextEditingController(text: 'http://localhost:8000');
   bool _loading = false;
   String? _error;
 
