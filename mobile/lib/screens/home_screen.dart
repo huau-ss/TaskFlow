@@ -32,10 +32,45 @@ class _HomeScreenState extends State<HomeScreen> {
   List<dynamic> _meetings = [];
   bool _loading = true;
   bool _hasPendingUploads = false;
-  bool _voicePrintVisited = false;
   int _unreadMessageCount = 0;
 
   bool get _showVoicePrintTab => widget.api.isAdmin;
+
+  /// 构建非管理员用户也能正常对齐的标签结构
+  List<_TabItem> get _tabs {
+    final tabs = <_TabItem>[
+      _TabItem(icon: Icons.meeting_room, label: '会议'),
+      _TabItem(icon: Icons.cloud_upload, label: '上传', badge: _hasPendingUploads),
+      _TabItem(icon: Icons.task_alt, label: '任务'),
+      _TabItem(icon: Icons.notifications, label: '消息', badge: _unreadMessageCount > 0, badgeText: _unreadMessageCount > 99 ? '99+' : '$_unreadMessageCount'),
+      _TabItem(icon: Icons.person, label: '我的'),
+    ];
+    // 管理员在「我的」之前插入声纹管理
+    if (_showVoicePrintTab) {
+      tabs.insert(3, _TabItem(icon: Icons.fingerprint, label: '声纹'));
+    }
+    return tabs;
+  }
+
+  Widget _buildTabChild(int i) {
+    final label = _tabs[i].label;
+    switch (label) {
+      case '会议':
+        return _buildMeetingsList();
+      case '上传':
+        return UploadQueueScreen(uploadQueue: widget.uploadQueue);
+      case '任务':
+        return TasksScreen(api: widget.api);
+      case '消息':
+        return MessagesScreen(api: widget.api);
+      case '我的':
+        return MeScreen(api: widget.api);
+      case '声纹':
+        return VoicePrintManagementScreen(api: widget.api);
+      default:
+        return const SizedBox.shrink();
+    }
+  }
 
   @override
   void initState() {
@@ -99,49 +134,26 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       body: IndexedStack(
         index: _tabIndex,
-        children: [
-          _buildMeetingsList(),
-          UploadQueueScreen(uploadQueue: widget.uploadQueue),
-          _showVoicePrintTab
-              ? (_voicePrintVisited ? VoicePrintManagementScreen(api: widget.api) : const SizedBox.shrink())
-              : const _NonAdminPlaceholder(),
-          TasksScreen(api: widget.api),
-          MessagesScreen(api: widget.api),
-          MeScreen(api: widget.api),
-        ],
+        children: List.generate(_tabs.length, (i) => _buildTabChild(i)),
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tabIndex,
         onDestinationSelected: (i) {
-          if (!_showVoicePrintTab && i == 2) return;
-          setState(() {
-            _tabIndex = i;
-            if (i == 2) _voicePrintVisited = true;
-          });
+          setState(() => _tabIndex = i);
           _loadPendingUploads();
-          if (i == 4) _loadUnreadCount();
+          if (_tabs[i].label == '消息') _loadUnreadCount();
         },
-        destinations: [
-          const NavigationDestination(icon: Icon(Icons.meeting_room), label: '会议'),
-          NavigationDestination(
-            icon: Badge(
-              isLabelVisible: _hasPendingUploads,
-              child: const Icon(Icons.cloud_upload),
-            ),
-            label: '上传',
-          ),
-          if (_showVoicePrintTab) const NavigationDestination(icon: Icon(Icons.fingerprint), label: '声纹'),
-          const NavigationDestination(icon: Icon(Icons.task_alt), label: '任务'),
-          NavigationDestination(
-            icon: Badge(
-              isLabelVisible: _unreadMessageCount > 0,
-              label: _unreadMessageCount > 99 ? const Text('99+') : Text('$_unreadMessageCount'),
-              child: const Icon(Icons.notifications),
-            ),
-            label: '消息',
-          ),
-          const NavigationDestination(icon: Icon(Icons.person), label: '我的'),
-        ],
+        destinations: _tabs.map((t) {
+          Widget icon = Icon(t.icon);
+          if (t.badge) {
+            icon = Badge(
+              isLabelVisible: true,
+              label: t.badgeText != null ? Text(t.badgeText!) : null,
+              child: icon,
+            );
+          }
+          return NavigationDestination(icon: icon, label: t.label);
+        }).toList(),
       ),
       floatingActionButton: _tabIndex == 0
           ? FloatingActionButton.extended(
@@ -204,23 +216,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-class _NonAdminPlaceholder extends StatelessWidget {
-  const _NonAdminPlaceholder();
+class _TabItem {
+  final IconData icon;
+  final String label;
+  final bool badge;
+  final String? badgeText;
 
-  @override
-  Widget build(BuildContext context) {
-    return const Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.lock_outline, size: 64, color: Colors.grey),
-          SizedBox(height: 16),
-          Text(
-            '声纹管理需要管理员权限',
-            style: TextStyle(fontSize: 16, color: Colors.grey),
-          ),
-        ],
-      ),
-    );
-  }
+  _TabItem({required this.icon, required this.label, this.badge = false, this.badgeText});
 }
