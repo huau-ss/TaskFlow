@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import auth, employees, meetings, voiceprints, messages, tasks
+from app.routers import auth, employees, meetings, voiceprints, messages, tasks, transcripts
 from app.schemas import HealthResponse
 from app.services.health import check_asr_health, check_diarization_health, check_llm_health
 
@@ -33,6 +33,7 @@ app.include_router(meetings.router)
 app.include_router(voiceprints.router)
 app.include_router(messages.router)
 app.include_router(tasks.router)
+app.include_router(transcripts.router)
 
 
 @app.get("/health", response_model=HealthResponse)

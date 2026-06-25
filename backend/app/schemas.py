@@ -57,6 +57,7 @@ class MeetingResponse(BaseModel):
     file_size: int | None
     status: MeetingStatus
     asr_error: str | None
+    optimized_text: str | None
     creator_id: int | None
     created_at: datetime
 

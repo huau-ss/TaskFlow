@@ -82,6 +82,7 @@ class Meeting(Base):
         Enum(MeetingStatus, name="meeting_status"), default=MeetingStatus.uploaded
     )
     asr_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    optimized_text: Mapped[str | None] = mapped_column(Text, nullable=True)  # LLM 优化后的转写文本
     creator_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

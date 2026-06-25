@@ -9,7 +9,7 @@ import 'services/upload_queue.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final prefs = await SharedPreferences.getInstance();
-  final apiBaseUrl = prefs.getString('api_base_url') ?? 'http://192.168.10.8:8000';
+  final apiBaseUrl = prefs.getString('api_base_url') ?? 'http://localhost:8000';
   final api = ApiService(baseUrl: apiBaseUrl);
   await api.loadToken();
   final uploadQueue = UploadQueue(api: api);

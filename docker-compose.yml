@@ -91,7 +91,7 @@ services:
       resources:
         limits:
           cpus: "8"
-          memory: 10G
+          memory: 14G
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
       interval: 30s
