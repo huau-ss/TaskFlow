@@ -28,9 +28,9 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 # ── 模型路径 ──
-ASR_MODEL = "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
-VAD_MODEL = "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch"
-PUNC_MODEL = "iic/punc_ct-transformer_zh-cn-common-vad_realtime-vocab272727"
+ASR_MODEL = "paraformer-zh"  # 支持词级时间戳
+VAD_MODEL = "fsmn-vad"
+PUNC_MODEL = "ct-punc"
 SPK_MODEL = "iic/speech_campplus_sv_zh-cn_16k-common"
 
 # ── OOM 防护：单次处理最大音频时长（秒）──
@@ -59,6 +59,7 @@ def _load_models():
             vad_model=VAD_MODEL,
             punc_model=PUNC_MODEL,
             spk_model=SPK_MODEL,
+            timestamp_model=True,   # 启用词级时间戳，说话人分离依赖此功能
             device="cpu",
             ncpu=4,
             disable_update=True,
@@ -197,7 +198,6 @@ async def transcribe(file: UploadFile = File(...)):
             batch_size_s=300,
             hotword="",
             is_final=True,
-            return_timestamp=True,
         )
 
         if not result or len(result) == 0:
