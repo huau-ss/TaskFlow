@@ -197,7 +197,6 @@ async def transcribe(file: UploadFile = File(...)):
             batch_size_s=300,
             hotword="",
             is_final=True,
-            chunk_size=[0, 10, 5],
         )
 
         if not result or len(result) == 0:
