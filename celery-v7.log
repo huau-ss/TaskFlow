@@ -1,0 +1,67 @@
+ 
+ -------------- celery@localhost.localdomain v5.6.3 (recovery)
+--- ***** ----- 
+-- ******* ---- Linux-5.14.0-710.el9.x86_64-x86_64-with-glibc2.34 2026-06-24 16:48:03
+- *** --- * --- 
+- ** ---------- [config]
+- ** ---------- .> app:         taskflow:0x7f30063ea7d0
+- ** ---------- .> transport:   redis://localhost:6379/0
+- ** ---------- .> results:     redis://localhost:6379/0
+- *** --- * --- .> concurrency: 12 (prefork)
+-- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+--- ***** ----- 
+ -------------- [queues]
+                .> celery           exchange=celery(direct) key=celery
+                
+
+[tasks]
+  . transcribe_meeting
+
+[2026-06-24 16:49:08,655: INFO/MainProcess] Connected to redis://localhost:6379/0
+[2026-06-24 16:49:08,864: INFO/MainProcess] mingle: searching for neighbors
+[2026-06-24 16:49:10,326: INFO/MainProcess] mingle: all alone
+[2026-06-24 16:49:10,620: INFO/MainProcess] celery@localhost.localdomain ready.
+[2026-06-25 10:05:05,757: INFO/MainProcess] Task transcribe_meeting[075c1348-e9f4-4d1b-b00c-f835c501e695] received
+[2026-06-25 10:05:08,607: INFO/ForkPoolWorker-8] 会议 13: 调用 FunASR 统一转写...
+[2026-06-25 10:06:24,176: INFO/MainProcess] Task transcribe_meeting[56802aad-25df-45fd-bed8-a3ca10966b03] received
+[2026-06-25 10:06:28,304: INFO/ForkPoolWorker-1] 会议 14: 调用 FunASR 统一转写...
+[2026-06-25 10:10:53,350: INFO/ForkPoolWorker-8] HTTP Request: POST http://localhost:8005/api/transcribe "HTTP/1.1 200 OK"
+[2026-06-25 10:10:53,403: INFO/ForkPoolWorker-8] 会议 13: FunASR 返回 4 段, 1 说话人
+[2026-06-25 10:10:53,406: INFO/ForkPoolWorker-8] [声纹识别] 开始处理 4 个 segment (聚合匹配)
+[2026-06-25 10:10:53,796: INFO/ForkPoolWorker-8] [声纹识别] SPEAKER_00 (4段, 103.0s): 命中 员工#16 相似度=0.3223 gap=0.1593 (abs=0.3223>=0.3 or gap=0.1593>=0.1) | 所有分数: 员工#17=0.0733, 员工#16=0.3223, 员工#9=-0.0093, 员工#7=0.1630, 员工#10=0.1235, 员工#18=0.0413, 员工#15=0.1306, 员工#8=0.1412
+[2026-06-25 10:10:53,814: INFO/ForkPoolWorker-8] [声纹识别] SPEAKER_00 (4段, 103.0s): → 员工#16 置信度=0.3223
+[2026-06-25 10:10:55,759: INFO/ForkPoolWorker-1] HTTP Request: POST http://localhost:8005/api/transcribe "HTTP/1.1 500 Internal Server Error"
+[2026-06-25 10:10:56,742: WARNING/ForkPoolWorker-8] 写入 NAS 转写片段失败: [Errno 13] Permission denied: '/home/admin/nas/meetings/transcript_segments/13.json'
+[2026-06-25 10:10:56,989: INFO/MainProcess] Task transcribe_meeting[56802aad-25df-45fd-bed8-a3ca10966b03] received
+[2026-06-25 10:10:58,110: INFO/ForkPoolWorker-1] Task transcribe_meeting[56802aad-25df-45fd-bed8-a3ca10966b03] retry: Retry in 60s: Exception("Server error '500 Internal Server Error' for url 'http://localhost:8005/api/transcribe'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500")
+[2026-06-25 10:11:58,216: ERROR/ForkPoolWorker-1] Task transcribe_meeting[56802aad-25df-45fd-bed8-a3ca10966b03] raised unexpected: AttributeError('pending')
+Traceback (most recent call last):
+  File "/home/admin/app/taskflow/backend/venv/lib64/python3.11/site-packages/celery/app/trace.py", line 585, in trace_task
+    R = retval = fun(*args, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^
+  File "/home/admin/app/taskflow/backend/venv/lib64/python3.11/site-packages/celery/app/trace.py", line 858, in __protected_call__
+    return self.run(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/admin/app/taskflow/backend/app/tasks/asr.py", line 856, in transcribe_meeting
+    meeting.status = MeetingStatus.pending
+                     ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib64/python3.11/enum.py", line 786, in __getattr__
+    raise AttributeError(name) from None
+AttributeError: pending
+[2026-06-25 10:26:14,436: INFO/ForkPoolWorker-8] HTTP Request: POST http://192.168.10.12:8000/v1/chat/completions "HTTP/1.1 200 OK"
+[2026-06-25 10:26:14,918: INFO/ForkPoolWorker-8] 会议 13: 提取 5 个任务, 发送 5 条通知
+[2026-06-25 10:26:15,007: INFO/ForkPoolWorker-8] Task transcribe_meeting[075c1348-e9f4-4d1b-b00c-f835c501e695] succeeded in 1269.1222398180107s: {'meeting_id': 13, 'pipeline_mode': 'funasr', 'segments': 4, 'recognized_speakers': 4, 'tasks_created': 5, 'notifications_sent': 5}
+[2026-06-25 10:30:06,757: INFO/MainProcess] Task transcribe_meeting[8841dd45-2abc-4bec-938a-9e791699f43d] received
+[2026-06-25 10:30:07,168: INFO/ForkPoolWorker-8] 会议 14: 调用 FunASR 统一转写...
+[2026-06-25 10:36:24,852: INFO/ForkPoolWorker-8] HTTP Request: POST http://localhost:8005/api/transcribe "HTTP/1.1 200 OK"
+[2026-06-25 10:36:24,881: INFO/ForkPoolWorker-8] 会议 14: FunASR 返回 4 段, 2 说话人
+[2026-06-25 10:36:24,883: INFO/ForkPoolWorker-8] [声纹识别] 开始处理 4 个 segment (聚合匹配)
+[2026-06-25 10:36:24,955: INFO/ForkPoolWorker-8] [声纹识别] SPEAKER_01 (2段, 52.9s): 拒绝 — 最佳 员工#16=0.2427 gap=0.0320 (abs=0.2427>=0.3 or gap=0.0320>=0.1) | 所有分数: 员工#17=0.1781, 员工#16=0.2427, 员工#9=-0.0631, 员工#7=0.2107, 员工#10=0.0355, 员工#18=0.1606, 员工#15=0.1277, 员工#8=-0.0142
+[2026-06-25 10:36:24,958: INFO/ForkPoolWorker-8] [声纹识别] SPEAKER_01 (2段, 52.9s): → 员工#None 置信度=0.2427
+[2026-06-25 10:36:25,000: INFO/ForkPoolWorker-8] [声纹识别] SPEAKER_00 (2段, 52.9s): 拒绝 — 最佳 员工#15=0.2664 gap=0.0141 (abs=0.2664>=0.3 or gap=0.0141>=0.1) | 所有分数: 员工#17=-0.0489, 员工#16=0.0463, 员工#9=0.0777, 员工#7=0.0876, 员工#10=0.1183, 员工#18=-0.0469, 员工#15=0.2664, 员工#8=0.2523
+[2026-06-25 10:36:25,002: INFO/ForkPoolWorker-8] [声纹识别] SPEAKER_00 (2段, 52.9s): → 员工#None 置信度=0.2664
+[2026-06-25 10:36:26,178: WARNING/ForkPoolWorker-8] 写入 NAS 转写片段失败: [Errno 13] Permission denied: '/home/admin/nas/meetings/transcript_segments/14.json'
+[2026-06-25 10:36:26,317: INFO/ForkPoolWorker-8] Retrying request to /chat/completions in 0.484124 seconds
+[2026-06-25 10:36:36,807: INFO/ForkPoolWorker-8] HTTP Request: POST http://192.168.10.12:8000/v1/chat/completions "HTTP/1.1 200 OK"
+[2026-06-25 10:36:37,124: INFO/ForkPoolWorker-8] 会议 14: 提取 4 个任务, 发送 4 条通知
+[2026-06-25 10:36:37,134: INFO/ForkPoolWorker-8] Task transcribe_meeting[8841dd45-2abc-4bec-938a-9e791699f43d] succeeded in 390.3341391339927s: {'meeting_id': 14, 'pipeline_mode': 'funasr', 'segments': 4, 'recognized_speakers': 0, 'tasks_created': 4, 'notifications_sent': 4}

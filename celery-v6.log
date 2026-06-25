@@ -1,0 +1,28 @@
+ 
+ -------------- celery@funasr-v6 v5.6.3 (recovery)
+--- ***** ----- 
+-- ******* ---- Linux-5.14.0-691.el9.x86_64-x86_64-with-glibc2.34 2026-06-24 09:39:32
+- *** --- * --- 
+- ** ---------- [config]
+- ** ---------- .> app:         taskflow:0x7efeebb123d0
+- ** ---------- .> transport:   redis://localhost:6379/0
+- ** ---------- .> results:     redis://localhost:6379/0
+- *** --- * --- .> concurrency: 4 (prefork)
+-- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+--- ***** ----- 
+ -------------- [queues]
+                .> celery           exchange=celery(direct) key=celery
+                
+
+[tasks]
+  . transcribe_meeting
+
+[2026-06-24 09:39:32,741: INFO/MainProcess] Connected to redis://localhost:6379/0
+[2026-06-24 09:39:32,748: INFO/MainProcess] mingle: searching for neighbors
+[2026-06-24 09:39:33,760: INFO/MainProcess] mingle: all alone
+[2026-06-24 09:39:33,781: INFO/MainProcess] celery@funasr-v6 ready.
+[2026-06-24 09:49:38,849: INFO/MainProcess] Task transcribe_meeting[faa94f5d-4b30-47c4-8a17-f188d928f773] received
+[2026-06-24 09:49:38,962: INFO/ForkPoolWorker-4] 会议 12: 调用 FunASR 统一转写...
+[2026-06-24 09:50:42,391: INFO/MainProcess] missed heartbeat from celery@funasr-v7
+[2026-06-24 09:50:42,892: WARNING/MainProcess] Substantial drift from celery@funasr-v7 may mean clocks are out of sync.  Current drift is 31 seconds.  [orig: 2026-06-24 09:50:42.887528 recv: 2026-06-24 09:50:11.132300]
+[2026-06-24 09:50:54,093: INFO/ForkPoolWorker-4] Task transcribe_meeting[faa94f5d-4b30-47c4-8a17-f188d928f773] succeeded in 75.21054393285885s: {'error': 'Server disconnected without sending a response.'}
