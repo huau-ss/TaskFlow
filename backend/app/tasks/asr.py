@@ -853,7 +853,7 @@ def transcribe_meeting(self, meeting_id: int) -> dict:
         with SyncSession() as retry_db:
             meeting = retry_db.get(Meeting, meeting_id)
             if meeting:
-                meeting.status = MeetingStatus.pending
+                meeting.status = MeetingStatus.uploaded
                 retry_db.commit()
 
     result = run_transcribe_meeting(meeting_id)

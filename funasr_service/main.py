@@ -163,10 +163,6 @@ async def transcribe(file: UploadFile = File(...)):
 
     if not _models_loaded:
         _load_models()
-    # VAD 模型可能在上一次转写中被卸载，重新加载
-    if _vad is None:
-        logger.info("重新加载 VAD 模型...")
-        _vad = AutoModel(model=VAD_MODEL, device="cpu", disable_update=True)
 
     t0 = time.time()
 
