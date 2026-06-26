@@ -788,29 +788,52 @@ def run_transcribe_meeting(meeting_id: int) -> dict:
             logger.info(f"会议 {meeting_id} 转写片段已备份至 NAS: {saved}")
     # ── sync session closed here ──
 
-    # ── Phase 2: 任务提取 + 通知（sync，无 asyncio.run 开销）──
+    # ── Phase 2: LangGraph 工作流（LLM 优化转写 + 任务提取 + 关联分析 + 报告生成 + 通知）──
+    # Phase 1 session 已关闭。工作流内部会设置 Meeting.status = processing → processed。
+    # 但为让前端尽快看到"处理中"状态，这里在派发前先开一个短 session 更新状态。
     tasks_created = 0
     notifications_sent = 0
-    errors: list[str] = []
+    wf_warnings: list[str] = []
+    wf_errors: list[str] = []
+    report_path: str | None = None
+
     try:
-        from app.agents.task_extract import run_task_extraction_sync
-        from app.agents.task_notification import send_task_notifications_sync
-
-        with SyncSession() as phase2_db:
-            created_ids, errors = run_task_extraction_sync(phase2_db, meeting_id)
-            phase2_db.commit()
-            tasks_created = len(created_ids)
-            notifications_sent = tasks_created  # 每个任务最多发一条通知
-
-        if errors:
-            for err in errors:
-                logger.warning(f"会议 {meeting_id} Phase 2 错误: {err}")
-        logger.info(
-            f"会议 {meeting_id}: 提取 {tasks_created} 个任务, "
-            f"发送 {notifications_sent} 条通知"
-        )
+        # 先更新状态为 processing（让前端立即看到处理中）
+        with SyncSession() as status_db:
+            m = status_db.get(Meeting, meeting_id)
+            if m and m.status == MeetingStatus.transcribed:
+                m.status = MeetingStatus.processing
+                status_db.commit()
     except Exception as e:
-        logger.warning(f"自动任务提取/通知失败: {e}")
+        logger.warning(f"会议 {meeting_id} 状态更新为 processing 失败: {e}")
+
+    try:
+        from app.agents.meeting_workflow import run_meeting_workflow_sync
+        wf_result = run_meeting_workflow_sync(meeting_id)
+        tasks_created = len(wf_result.get("task_ids", []))
+        notifications_sent = wf_result.get("notifications_sent", 0)
+        report_path = wf_result.get("report_path")
+        wf_errors = wf_result.get("errors", [])
+        wf_warnings = wf_result.get("warnings", [])
+
+        if wf_errors:
+            for err in wf_errors:
+                logger.warning(f"会议 {meeting_id} 工作流错误: {err}")
+    except Exception as e:
+        logger.warning(f"自动工作流启动失败（不影响转写结果）: {e}")
+
+    # 如果有 workflows warnings 且任务数为 0，说明工作流运行了但没产出任务
+    if wf_warnings:
+        for w in wf_warnings:
+            logger.info(f"会议 {meeting_id} 工作流 warning: {w}")
+
+    # 派发单会议关联分析（异步，不阻塞返回）
+    try:
+        from app.tasks.relation_analysis import analyze_single_meeting_relations
+        analyze_single_meeting_relations.delay(meeting_id)
+        logger.info("会议 %d 关联分析任务已派发", meeting_id)
+    except Exception as e:
+        logger.warning(f"派发会议 %d 关联分析任务失败: {e}", meeting_id)
 
     return {
         "meeting_id": meeting_id,
@@ -821,6 +844,8 @@ def run_transcribe_meeting(meeting_id: int) -> dict:
         ),
         "tasks_created": tasks_created,
         "notifications_sent": notifications_sent,
+        "report_path": report_path,
+        "workflow_warnings": wf_warnings,
     }
 
 
@@ -848,12 +873,12 @@ def _is_transient_failure(result: dict) -> bool:
 
 @celery_app.task(name="transcribe_meeting", bind=True, max_retries=3)
 def transcribe_meeting(self, meeting_id: int) -> dict:
-    # 重试前先将状态恢复为 pending，让前端看到"正在重新处理"而非一直"失败"
+    # 重试前先将状态恢复为 transcribed，让前端看到"正在处理"而非一直"失败"
     if self.request.retries > 0:
         with SyncSession() as retry_db:
             meeting = retry_db.get(Meeting, meeting_id)
             if meeting:
-                meeting.status = MeetingStatus.uploaded
+                meeting.status = MeetingStatus.transcribed
                 retry_db.commit()
 
     result = run_transcribe_meeting(meeting_id)

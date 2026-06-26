@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../services/api_service.dart';
 
@@ -54,6 +55,18 @@ class _MeetingDetailScreenState extends State<MeetingDetailScreen> {
     }
   }
 
+  Future<void> _exportHtml() async {
+    final url = Uri.parse(widget.api.transcriptHtmlUrl(_meetingId));
+    if (await canLaunchUrl(url)) {
+      await launchUrl(url, mode: LaunchMode.externalApplication);
+    } else {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('无法打开浏览器')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final status = widget.meeting['status'] as String?;
@@ -78,6 +91,18 @@ class _MeetingDetailScreenState extends State<MeetingDetailScreen> {
                         : null,
                   ),
                 ),
+                if (status == 'transcribed') ...[
+                  const SizedBox(height: 8),
+                  Card(
+                    child: ListTile(
+                      leading: const Icon(Icons.html),
+                      title: const Text('导出 HTML'),
+                      subtitle: const Text('在手机浏览器中查看双栏转写结果'),
+                      trailing: const Icon(Icons.open_in_new),
+                      onTap: _exportHtml,
+                    ),
+                  ),
+                ],
                 if (_transcript != null) ...[
                   const SizedBox(height: 16),
                   Text('转写分段', style: Theme.of(context).textTheme.titleMedium),

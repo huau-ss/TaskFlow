@@ -193,3 +193,31 @@ def get_meeting_segments_sync(
     )
     logger.debug(f"会议 {meeting_id} 从 DB 回退读取 {len(segments)} 个片段")
     return segments
+
+
+# ── HTML 报告存储 ─────────────────────────────────────────────────────
+
+def _get_reports_dir() -> Path:
+    """获取报告存储目录"""
+    root = Path(settings.transcript_segments_path).parent / "reports"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def save_html_report(meeting_id: int, html_content: str) -> str | None:
+    """
+    将 HTML 报告写入 NAS。
+
+    文件路径：{transcript_segments_path}/../reports/{meeting_id}.html
+
+    Returns:
+        报告文件路径，失败返回 None
+    """
+    try:
+        path = _get_reports_dir() / f"{meeting_id}.html"
+        path.write_text(html_content, encoding="utf-8")
+        logger.info(f"HTML 报告已保存: {path}")
+        return str(path)
+    except Exception as e:
+        logger.warning(f"写入 HTML 报告失败 (meeting_id={meeting_id}): {e}")
+        return None

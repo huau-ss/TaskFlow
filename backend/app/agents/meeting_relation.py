@@ -69,8 +69,10 @@ def _build_llm() -> ChatOpenAI:
 
 
 async def _load_meetings(db: AsyncSession, meeting_ids: list[int] | None = None) -> list[dict]:
-    """加载已转录会议及其转写文本"""
-    query = select(Meeting).where(Meeting.status == MeetingStatus.transcribed)
+    """加载已转录/已处理会议及其转写文本"""
+    query = select(Meeting).where(
+        Meeting.status.in_([MeetingStatus.transcribed, MeetingStatus.processed])
+    )
     if meeting_ids:
         query = query.where(Meeting.id.in_(meeting_ids))
 

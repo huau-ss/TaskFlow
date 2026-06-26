@@ -283,3 +283,4 @@ class MeetingRelationAnalyzeResponse(BaseModel):
     new_relations: int   # 新增关联数
     updated_relations: int  # 更新关联数
     relations: list[MeetingRelationResponse]
+    task_id: str | None = None  # Celery 任务 ID，前端可轮询查看结果

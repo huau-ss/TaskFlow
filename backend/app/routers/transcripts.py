@@ -76,6 +76,8 @@ async def optimize_transcript(
     meeting = await db.get(Meeting, meeting_id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
+    if not current_user.is_admin and meeting.creator_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权限访问该会议")
     if meeting.status.value != "transcribed":
         raise HTTPException(
             status_code=400,
@@ -179,6 +181,8 @@ async def export_transcript_html(
     meeting = await db.get(Meeting, meeting_id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
+    if not current_user.is_admin and meeting.creator_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权限访问该会议")
     if meeting.status.value != "transcribed":
         raise HTTPException(status_code=400, detail="Meeting not transcribed")
 
@@ -231,6 +235,8 @@ async def get_transcript_segments(
     meeting = await db.get(Meeting, meeting_id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
+    if not current_user.is_admin and meeting.creator_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权限访问该会议")
 
     segments_result = await db.execute(
         select(TranscriptSegment).where(TranscriptSegment.meeting_id == meeting_id)

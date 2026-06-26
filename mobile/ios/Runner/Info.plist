@@ -44,6 +44,16 @@
     </dict>
     <key>NSAppleMusicUsageDescription</key>
     <string>需要访问音频文件</string>
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>audio</string>
+    </array>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>用于连接本地 ASR 服务</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_http._tcp</string>
+    </array>
     <key>UIFileSharingEnabled</key>
     <true/>
     <key>LSSupportsOpeningDocumentsInPlace</key>

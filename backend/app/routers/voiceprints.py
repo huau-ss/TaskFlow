@@ -249,7 +249,7 @@ async def get_employee_voiceprints(
 async def recognize_meeting_speakers(
     meeting_id: int,
     db: AsyncSession = Depends(get_db),
-    _: Employee = Depends(get_current_user),
+    current_user: Employee = Depends(get_current_user),
 ):
     """
     对会议录音进行说话人识别（重识别）。
@@ -266,6 +266,9 @@ async def recognize_meeting_speakers(
     meeting = await db.get(Meeting, meeting_id, options=[selectinload(Meeting.segments)])
     if not meeting:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="会议不存在")
+
+    if not current_user.is_admin and meeting.creator_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权限访问该会议")
 
     if meeting.status != MeetingStatus.transcribed:
         raise HTTPException(

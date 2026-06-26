@@ -92,6 +92,10 @@ class ApiService {
     return resp.data as Map<String, dynamic>;
   }
 
+  /// 返回会议转写 HTML 导出页面的完整 URL。
+  String transcriptHtmlUrl(int meetingId, {String version = 'both'}) =>
+      '$baseUrl/transcripts/$meetingId/export/html?version=$version';
+
   Future<List<dynamic>> listMeetingTasks(int meetingId) async {
     final resp = await _dio.get('/meetings/$meetingId/tasks');
     return resp.data as List<dynamic>;
